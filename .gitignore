@@ -1,0 +1,14 @@
+/target
+/data
+*.pcm
+/knowledge/*
+!/knowledge/.gitkeep
+compose.override.yaml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+deploy.sh
+public/setup.php
