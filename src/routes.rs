@@ -23,13 +23,17 @@ use crate::jobs;
 use crate::knowledge;
 use crate::state::AppState;
 
-const SESSION_COOKIE: &str = "gijiroku_session";
+const SESSION_COOKIE: &str = "kikimimi_session";
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/api/auth/register/code", post(register_code))
+        .route("/api/auth/register/verify", post(register_verify))
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
+        .route("/api/auth/password/forgot", post(forgot_password))
+        .route("/api/auth/password/reset", post(reset_password))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
         .route("/api/auth/password", post(change_password))
@@ -72,6 +76,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/meetings/:id/pause", post(pause_meeting))
         .route("/api/meetings/:id/resume", post(resume_meeting))
         .route("/api/meetings/:id/finish", post(finish_meeting))
+        .route("/api/meetings/:id/speech", post(set_speech))
+        .route("/api/meetings/:id/captions", post(save_caption))
         .route("/api/meetings/:id/cancel-finish", post(cancel_finish))
         .route("/api/meetings/:id/retry-audio", post(retry_audio))
         .route("/api/meetings/:id/give-up-retries", post(give_up_retries))
@@ -150,7 +156,14 @@ async fn auth(
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_string();
-    if !path.starts_with("/api/") || path == "/api/auth/register" || path == "/api/auth/login" {
+    if !path.starts_with("/api/")
+        || path == "/api/auth/register"
+        || path == "/api/auth/register/code"
+        || path == "/api/auth/register/verify"
+        || path == "/api/auth/login"
+        || path == "/api/auth/password/forgot"
+        || path == "/api/auth/password/reset"
+    {
         return next.run(request).await;
     }
     let Some(token) = cookie_value(request.headers(), SESSION_COOKIE) else {
@@ -188,7 +201,7 @@ async fn auth(
 }
 
 fn secure_cookie(headers: &HeaderMap) -> bool {
-    std::env::var("GIJIROKU_SECURE_COOKIE").ok().as_deref() == Some("1")
+    std::env::var("KIKIMIMI_SECURE_COOKIE").ok().as_deref() == Some("1")
         || headers
             .get("x-forwarded-proto")
             .and_then(|value| value.to_str().ok())
@@ -205,11 +218,11 @@ fn session_cookie(token: &str, headers: &HeaderMap) -> HeaderValue {
 }
 
 fn clear_cookie() -> HeaderValue {
-    HeaderValue::from_static("gijiroku_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+    HeaderValue::from_static("kikimimi_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
 }
 
 fn client_ip(connect: Option<ConnectInfo<SocketAddr>>, headers: &HeaderMap) -> String {
-    if std::env::var("GIJIROKU_TRUST_PROXY").ok().as_deref() == Some("1") {
+    if std::env::var("KIKIMIMI_TRUST_PROXY").ok().as_deref() == Some("1") {
         if let Some(forwarded) = headers
             .get("x-forwarded-for")
             .and_then(|value| value.to_str().ok())
@@ -238,24 +251,163 @@ struct Credentials {
     password: String,
 }
 
+#[derive(Deserialize)]
+struct RegisterCodeBody {
+    login_id: String,
+    #[serde(default)]
+    invite: String,
+}
+
+#[derive(Deserialize)]
+struct EmailBody {
+    login_id: String,
+}
+
+#[derive(Deserialize)]
+struct CodeCheckBody {
+    login_id: String,
+    code: String,
+}
+
+#[derive(Deserialize)]
+struct ResetBody {
+    login_id: String,
+    code: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct RegisterBody {
+    login_id: String,
+    password: String,
+    code: String,
+    #[serde(default)]
+    invite: String,
+}
+
+fn email_of(raw: &str) -> Result<String, AppError> {
+    accounts::normalize_email(raw).map_err(|code| {
+        bad("ログインID（メールアドレス）の形になっていません。例: ada@example.com").code(code)
+    })
+}
+
+fn password_rule(password: &str) -> Result<(), AppError> {
+    accounts::check_password(password).map_err(|code| {
+        bad("パスワードは 8〜128 文字（文字の種類は問いません。すべて同じ文字だけのものは使えません）").code(code)
+    })
+}
+
+fn require_invite(invite: &str) -> Result<(), AppError> {
+    if accounts::invite_matches(invite) {
+        Ok(())
+    } else {
+        Err(bad("招待コードが違います。").code("invalid_invite"))
+    }
+}
+
+fn six_digits(raw: &str) -> Result<String, AppError> {
+    let code = raw.trim().to_string();
+    if code.len() == 6 && code.chars().all(|ch| ch.is_ascii_digit()) {
+        Ok(code)
+    } else {
+        Err(signup_code_error("invalid_code"))
+    }
+}
+
+fn mail_problem(err: crate::mail::MailError) -> AppError {
+    match err {
+        crate::mail::MailError::Unconfigured => {
+            bad("確認メールを送る設定がありません。運用者に連絡してください。").code("mail_unconfigured")
+        }
+        crate::mail::MailError::Failed(message) => {
+            tracing::warn!(error = %message, "確認メールを送れませんでした");
+            bad("確認メールを送れませんでした。しばらくしてからやり直してください。").code("mail_failed")
+        }
+    }
+}
+
+fn signup_code_error(code: &str) -> AppError {
+    match code {
+        "code_expired" => bad("確認コードの期限が切れました。もう一度メールを送ってください。").code("code_expired"),
+        "code_locked" => bad("確認コードを何度も間違えました。もう一度メールを送ってください。").code("code_locked"),
+        "password_changed" => {
+            bad("パスワードが、確認コードを送ったときと違います。最初からやり直してください。").code("password_changed")
+        }
+        _ => bad("確認コードが違います。メールに届いた6桁の数字を入力してください。").code("invalid_code"),
+    }
+}
+
+async fn register_code(
+    State(state): State<AppState>,
+    connect: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    Json(body): Json<RegisterCodeBody>,
+) -> Result<Json<Value>, AppError> {
+    let ip = client_ip(connect, &headers);
+    state
+        .throttle(&format!("register-code:{ip}"), 10, Duration::from_secs(3600))
+        .map_err(rate_limited)?;
+    state
+        .throttle("register-code:all", 200, Duration::from_secs(3600))
+        .map_err(rate_limited)?;
+    let login_id = email_of(&body.login_id)?;
+    state
+        .throttle(&format!("register-code:{login_id}"), 5, Duration::from_secs(3600))
+        .map_err(rate_limited)?;
+    require_invite(&body.invite)?;
+    let code = {
+        let conn = state.db().lock().await;
+        if accounts::user_id_by_login(&conn, &login_id).map_err(internal)?.is_some() {
+            return Err(
+                AppError::new(StatusCode::CONFLICT, "このメールアドレスはすでに登録されています").code("login_taken"),
+            );
+        }
+        let code = accounts::new_signup_code();
+        accounts::store_signup_code(&conn, &login_id, &code, "").map_err(internal)?;
+        code
+    };
+    if let Err(err) = tokio::task::spawn_blocking({
+        let login_id = login_id.clone();
+        let code = code.clone();
+        move || crate::mail::send_signup_code(&login_id, &code)
+    })
+    .await
+    .map_err(|err| internal(err.into()))?
+    {
+        let conn = state.db().lock().await;
+        let _ = accounts::delete_signup_code(&conn, &login_id);
+        return Err(mail_problem(err));
+    }
+    tracing::info!("登録の確認コードを送りました");
+    #[cfg(test)]
+    {
+        return Ok(Json(json!({"sent": true, "code": code})));
+    }
+    #[cfg(not(test))]
+    {
+        let _ = code;
+        Ok(Json(json!({"sent": true})))
+    }
+}
+
 async fn register(
     State(state): State<AppState>,
     connect: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
-    Json(body): Json<Credentials>,
+    Json(body): Json<RegisterBody>,
 ) -> Result<Response, AppError> {
     let ip = client_ip(connect, &headers);
     state
-        .throttle(&format!("register:{ip}"), 5, Duration::from_secs(3600))
+        .throttle(&format!("register:{ip}"), 30, Duration::from_secs(3600))
         .map_err(rate_limited)?;
-    state
-        .throttle("register:all", 200, Duration::from_secs(3600))
-        .map_err(rate_limited)?;
-    let login_id = accounts::normalize_login_id(&body.login_id).map_err(|code| {
-        bad("ログインIDは 3〜32 文字の英小文字・数字・_ . - で、英数字から始めてください（一部の語は使えません）").code(code)
-    })?;
-    accounts::check_password(&body.password)
-        .map_err(|code| bad("パスワードは 8〜128 文字（文字の種類は問いません。すべて同じ文字だけのものは使えません）").code(code))?;
+    let login_id = email_of(&body.login_id)?;
+    password_rule(&body.password)?;
+    require_invite(&body.invite)?;
+    let code = six_digits(&body.code)?;
+    {
+        let conn = state.db().lock().await;
+        accounts::match_signup_code(&conn, &login_id, &code).map_err(internal)?.map_err(signup_code_error)?;
+    }
     let password = body.password.clone();
     let hash = tokio::task::spawn_blocking(move || accounts::hash_password(&password))
         .await
@@ -263,15 +415,126 @@ async fn register(
         .map_err(internal)?;
     let created = {
         let conn = state.db().lock().await;
-        accounts::create_user(&conn, &login_id, &hash).map_err(internal)?
+        let created = accounts::create_user(&conn, &login_id, &hash).map_err(internal)?;
+        if created.is_some() {
+            accounts::delete_signup_code(&conn, &login_id).map_err(internal)?;
+        }
+        created
     };
     let Some(user_id) = created else {
         return Err(
-            AppError::new(StatusCode::CONFLICT, "このログインIDは使われています").code("login_taken"),
+            AppError::new(StatusCode::CONFLICT, "このメールアドレスはすでに登録されています").code("login_taken"),
         );
     };
     tracing::info!(user_id, "会員を登録しました");
     signed_in(&state, user_id, &headers, StatusCode::CREATED).await
+}
+
+async fn register_verify(
+    State(state): State<AppState>,
+    Json(body): Json<CodeCheckBody>,
+) -> Result<Json<Value>, AppError> {
+    let login_id = email_of(&body.login_id)?;
+    let code = six_digits(&body.code)?;
+    let conn = state.db().lock().await;
+    accounts::match_signup_code(&conn, &login_id, &code)
+        .map_err(internal)?
+        .map_err(signup_code_error)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn forgot_password(
+    State(state): State<AppState>,
+    connect: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    Json(body): Json<EmailBody>,
+) -> Result<Json<Value>, AppError> {
+    let ip = client_ip(connect, &headers);
+    state
+        .throttle(&format!("forgot:{ip}"), 10, Duration::from_secs(3600))
+        .map_err(rate_limited)?;
+    state
+        .throttle("forgot:all", 200, Duration::from_secs(3600))
+        .map_err(rate_limited)?;
+    let login_id = email_of(&body.login_id)?;
+    state
+        .throttle(&format!("forgot:{login_id}"), 5, Duration::from_secs(3600))
+        .map_err(rate_limited)?;
+    let code = {
+        let conn = state.db().lock().await;
+        if accounts::user_id_by_login(&conn, &login_id).map_err(internal)?.is_none() {
+            None
+        } else {
+            let code = accounts::new_signup_code();
+            accounts::store_reset_code(&conn, &login_id, &code).map_err(internal)?;
+            Some(code)
+        }
+    };
+    let Some(code) = code else {
+        return Ok(Json(json!({"sent": true})));
+    };
+    if let Err(err) = tokio::task::spawn_blocking({
+        let login_id = login_id.clone();
+        let code = code.clone();
+        move || crate::mail::send_reset_code(&login_id, &code)
+    })
+    .await
+    .map_err(|err| internal(err.into()))?
+    {
+        let conn = state.db().lock().await;
+        let _ = accounts::delete_reset_code(&conn, &login_id);
+        return Err(mail_problem(err));
+    }
+    tracing::info!("パスワード再設定の確認コードを送りました");
+    #[cfg(test)]
+    {
+        return Ok(Json(json!({"sent": true, "code": code})));
+    }
+    #[cfg(not(test))]
+    {
+        let _ = code;
+        Ok(Json(json!({"sent": true})))
+    }
+}
+
+async fn reset_password(
+    State(state): State<AppState>,
+    connect: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    Json(body): Json<ResetBody>,
+) -> Result<Response, AppError> {
+    let ip = client_ip(connect, &headers);
+    state
+        .throttle(&format!("reset:{ip}"), 30, Duration::from_secs(3600))
+        .map_err(rate_limited)?;
+    let login_id = email_of(&body.login_id)?;
+    password_rule(&body.password)?;
+    let code = six_digits(&body.code)?;
+    {
+        let conn = state.db().lock().await;
+        accounts::match_reset_code(&conn, &login_id, &code)
+            .map_err(internal)?
+            .map_err(signup_code_error)?;
+    }
+    let password = body.password.clone();
+    let hash = tokio::task::spawn_blocking(move || accounts::hash_password(&password))
+        .await
+        .map_err(|err| internal(err.into()))?
+        .map_err(internal)?;
+    let user_id = {
+        let conn = state.db().lock().await;
+        let user_id = accounts::user_id_by_login(&conn, &login_id).map_err(internal)?;
+        let Some(user_id) = user_id else {
+            let _ = accounts::delete_reset_code(&conn, &login_id);
+            return Err(signup_code_error("invalid_code"));
+        };
+        accounts::set_password(&conn, user_id, &hash).map_err(internal)?;
+        accounts::revoke_other_sessions(&conn, user_id, None).map_err(internal)?;
+        accounts::delete_reset_code(&conn, &login_id).map_err(internal)?;
+        user_id
+    };
+    tracing::info!(user_id, "パスワードを再設定しました");
+    signed_in(&state, user_id, &headers, StatusCode::OK).await
 }
 
 async fn signed_in(
@@ -422,7 +685,7 @@ async fn account(
 // ---- 静的ファイル（web/dist） ----
 
 fn web_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("GIJIROKU_WEB_DIR") {
+    if let Ok(dir) = std::env::var("KIKIMIMI_WEB_DIR") {
         return dir.into();
     }
     if let Some(dir) = std::env::current_exe()
@@ -654,7 +917,7 @@ fn check_fess_url(url: &str) -> Result<(), String> {
 /// 音声を Google に送るサーバ認識（Chrome の Web Speech API の既定）を、運用者が許可しているか。
 /// 会社の承認が要る外部送信なので、既定では許可しない（#104）。
 fn cloud_speech_allowed() -> bool {
-    std::env::var("GIJIROKU_ALLOW_CLOUD_SPEECH").is_ok_and(|value| value.trim() == "1")
+    std::env::var("KIKIMIMI_ALLOW_CLOUD_SPEECH").is_ok_and(|value| value.trim() == "1")
 }
 
 fn settings_json(
@@ -686,7 +949,7 @@ fn settings_json(
         "summary_prompt": settings.summary_prompt,
         "default_summary_prompt": db::DEFAULT_SUMMARY_PROMPT,
         "knowledge_path": settings.knowledge_path,
-        "knowledge_root": std::env::var("GIJIROKU_KNOWLEDGE_ROOT").unwrap_or_default(),
+        "knowledge_root": std::env::var("KIKIMIMI_KNOWLEDGE_ROOT").unwrap_or_default(),
         "fess_url": settings.fess_url,
         "fess_token_set": !settings.fess_token.is_empty(),
         "fess_enabled": settings.fess_enabled,
@@ -1157,12 +1420,55 @@ async fn publish_meeting(state: &AppState, id: i64) {
     }
 }
 
+#[derive(Deserialize, Default)]
+struct StartOpts {
+    #[serde(default)]
+    speech: String,
+    #[serde(default)]
+    transcript_only: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct FinishOpts {
+    #[serde(default)]
+    close: String,
+}
+
+#[derive(Deserialize)]
+struct SpeechOpts {
+    speech: String,
+    #[serde(default)]
+    transcript_only: bool,
+}
+
+#[derive(Deserialize)]
+struct CaptionOpts {
+    start_sec: f64,
+    text: String,
+}
+
+fn parse_or_empty<T: serde::de::DeserializeOwned + Default>(bytes: &Bytes) -> Result<T, AppError> {
+    if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(T::default());
+    }
+    serde_json::from_slice(bytes).map_err(|_| bad("リクエストを読めません"))
+}
+
 async fn start_meeting(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<i64>,
+    body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     owned(&state, &user, id).await?;
+    let opts: StartOpts = parse_or_empty(&body)?;
+    if !opts.speech.is_empty() {
+        if opts.speech == "api" {
+            require_transcribe_key(&state, user.id).await?;
+        }
+        let conn = state.db().lock().await;
+        db::set_speech(&conn, id, &opts.speech, opts.transcript_only).map_err(rejected)?;
+    }
     let limits = limits_of(&state, &user).await?;
     {
         let mut conn = state.db().lock().await;
@@ -1206,15 +1512,75 @@ async fn finish_meeting(
     State(state): State<AppState>,
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<i64>,
+    body: Bytes,
 ) -> Result<Json<Value>, AppError> {
     owned(&state, &user, id).await?;
+    let opts: FinishOpts = parse_or_empty(&body)?;
+    let mut close = opts.close;
+    if close == "api" {
+        require_transcribe_key(&state, user.id).await?;
+    } else if close == "chrome" {
+        let conn = state.db().lock().await;
+        let settings = db::get_user_settings(&conn, user.id).map_err(internal)?;
+        if !settings.has_chat_key() {
+            close = "plain".into();
+        }
+    }
     {
         let conn = state.db().lock().await;
-        db::request_finish(&conn, id).map_err(rejected)?;
+        db::prepare_finish(&conn, id, &close).map_err(rejected)?;
     }
     state.notify_jobs();
     publish_meeting(&state, id).await;
     meeting_json(&state, &user, id).await
+}
+
+async fn require_transcribe_key(state: &AppState, user_id: i64) -> Result<(), AppError> {
+    let conn = state.db().lock().await;
+    let settings = db::get_user_settings(&conn, user_id).map_err(internal)?;
+    if settings.has_transcribe_key() {
+        Ok(())
+    } else {
+        Err(bad("音声認識の確定には、文字起こし用のAPIキーが必要です"))
+    }
+}
+
+async fn set_speech(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+    Json(body): Json<SpeechOpts>,
+) -> Result<Json<Value>, AppError> {
+    owned(&state, &user, id).await?;
+    if body.speech == "api" {
+        require_transcribe_key(&state, user.id).await?;
+    }
+    {
+        let conn = state.db().lock().await;
+        db::set_speech(&conn, id, &body.speech, body.transcript_only).map_err(rejected)?;
+    }
+    publish_meeting(&state, id).await;
+    state.notify_jobs();
+    meeting_json(&state, &user, id).await
+}
+
+async fn save_caption(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+    Json(body): Json<CaptionOpts>,
+) -> Result<Json<Value>, AppError> {
+    owned(&state, &user, id).await?;
+    let segment = {
+        let conn = state.db().lock().await;
+        db::save_caption(&conn, id, body.start_sec, &body.text).map_err(rejected)?
+    };
+    if let Some(segment) = &segment {
+        state
+            .publish(id, json!({"type":"segment","segment": segment}))
+            .await;
+    }
+    Ok(Json(json!({"segment": segment})))
 }
 
 async fn cancel_finish(
@@ -1841,7 +2207,7 @@ async fn export_markdown(
     let markdown = export::render_scope(&minutes, scope);
     let name = export::file_name(&minutes);
     let disposition = format!(
-        "attachment; filename=\"gijiroku.md\"; filename*=UTF-8''{}",
+        "attachment; filename=\"kikimimi.md\"; filename*=UTF-8''{}",
         percent_encode(&name)
     );
     Ok((
@@ -2174,7 +2540,7 @@ async fn export_folder(
     let zip = crate::zip::store(&files);
     let file = format!("{}.zip", export::safe_file_stem(&name));
     let disposition = format!(
-        "attachment; filename=\"gijiroku.zip\"; filename*=UTF-8''{}",
+        "attachment; filename=\"kikimimi.zip\"; filename*=UTF-8''{}",
         percent_encode(&file)
     );
     Ok((

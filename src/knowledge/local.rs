@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn fts_and_short_query() {
-        let dir = std::env::temp_dir().join(format!("gijiroku-idx-{}", uuid_name()));
+        let dir = std::env::temp_dir().join(format!("kikimimi-idx-{}", uuid_name()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("budget.md"),
@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     fn broken_pdf_and_unreadable_entries_do_not_stop_indexing() {
-        let dir = std::env::temp_dir().join(format!("gijiroku-bad-{}", uuid_name()));
+        let dir = std::env::temp_dir().join(format!("kikimimi-bad-{}", uuid_name()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("broken.pdf"), b"%PDF-1.4 not really a pdf").unwrap();
         fs::write(dir.join("ok.md"), "# 手順\n\n発注の手順です。\n").unwrap();

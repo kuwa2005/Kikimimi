@@ -18,9 +18,9 @@ pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 const FALLBACK_MODELS: [&str; 4] = ["claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"];
 
-/// API の接続先。テストでは模擬サーバに向ける（`GIJIROKU_ANTHROPIC_BASE`）。
+/// API の接続先。テストでは模擬サーバに向ける（`KIKIMIMI_ANTHROPIC_BASE`）。
 fn base() -> String {
-    std::env::var("GIJIROKU_ANTHROPIC_BASE").unwrap_or_else(|_| "https://api.anthropic.com/v1".into())
+    std::env::var("KIKIMIMI_ANTHROPIC_BASE").unwrap_or_else(|_| "https://api.anthropic.com/v1".into())
 }
 
 fn request(http: &reqwest::Client, method: reqwest::Method, path: &str, api_key: &str) -> reqwest::RequestBuilder {

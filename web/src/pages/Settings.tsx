@@ -290,7 +290,7 @@ function RealtimeSection({ settings, onChanged }: { settings: SettingsData; onCh
     <section className="panel settings-section" aria-labelledby="sec-realtime">
       <h2 id="sec-realtime">リアルタイム文字起こし（速報字幕）</h2>
       <p className="muted small">
-        録音中に、Chrome の音声認識で話した内容をすぐ（1 秒ほどで）書き起こし欄に薄く出します。正式な書き起こし・回答・要約は、これまでどおり AI が区間ごとに作り、届いた部分の速報は置き換わります。速報は保存しません。
+        APIキーで文字起こしする会議では、録音中に Chrome の速報を出します。API の文字起こしが届いた部分の速報は置き換わり、速報自体は残りません。Chrome の音声認識だけを選んだ会議では、この認識を書き起こしとして保存します。
       </p>
       {!settings.realtime_allowed ? (
         <div className="banner">いまのプランでは、リアルタイム文字起こしは使えません。</div>

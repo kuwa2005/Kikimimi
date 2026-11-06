@@ -1,5 +1,5 @@
 [package]
-name = "gijiroku"
+name = "kikimimi"
 version = "0.1.0"
 edition = "2021"
 description = "Kikimimi（聞き耳）。Windows + Chrome 向けのローカル会議支援"
@@ -13,6 +13,7 @@ chacha20poly1305 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dirs = "5"
 futures-util = "0.3"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 getrandom = "0.2"
 flate2 = "1"
 pdf-extract = "0.7"

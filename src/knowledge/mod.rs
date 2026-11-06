@@ -133,10 +133,10 @@ pub async fn reindex(state: &AppState, user_id: i64) -> anyhow::Result<ReindexRe
     })
 }
 
-/// 運用者が許可したフォルダ（`GIJIROKU_KNOWLEDGE_ROOT`、カンマ区切り）の配下か。
+/// 運用者が許可したフォルダ（`KIKIMIMI_KNOWLEDGE_ROOT`、カンマ区切り）の配下か。
 /// 未設定なら、サーバ上のフォルダは指定させない（会員ごとのアップロードだけ使える）。
 pub fn knowledge_path_allowed(path: &str) -> Result<(), String> {
-    let roots: Vec<String> = std::env::var("GIJIROKU_KNOWLEDGE_ROOT")
+    let roots: Vec<String> = std::env::var("KIKIMIMI_KNOWLEDGE_ROOT")
         .unwrap_or_default()
         .split(',')
         .map(|root| root.trim().to_string())

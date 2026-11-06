@@ -13,13 +13,13 @@ import { CommandMenu, type Command } from "./components/CommandMenu";
 import { DialogHost } from "./components/DialogHost";
 import { Shell } from "./components/Shell";
 import { Account } from "./pages/Account";
-import { Login, Register } from "./pages/Auth";
+import { Login, Register, ResetPassword } from "./pages/Auth";
 import { Home } from "./pages/Home";
 import { MeetingForm } from "./pages/MeetingForm";
 import { MeetingPage } from "./pages/Meeting";
 import { Settings } from "./pages/Settings";
 
-const PUBLIC: Route["name"][] = ["login", "register"];
+const PUBLIC: Route["name"][] = ["login", "register", "reset"];
 
 function useCommands(route: Route): Command[] {
   const rec = useStore(recorderState);
@@ -94,7 +94,7 @@ export function App() {
   if (auth.status === "anon") {
     return (
       <>
-        {route.name === "register" ? <Register /> : <Login />}
+        {route.name === "register" ? <Register /> : route.name === "reset" ? <ResetPassword /> : <Login />}
         <DialogHost />
       </>
     );

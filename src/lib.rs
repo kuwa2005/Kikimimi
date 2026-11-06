@@ -13,6 +13,7 @@ mod export;
 mod gemini;
 mod jobs;
 mod knowledge;
+mod mail;
 mod openai;
 mod routes;
 mod state;
@@ -27,12 +28,12 @@ pub use routes::router;
 pub use state::AppState;
 
 pub fn default_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("GIJIROKU_DATA_DIR") {
+    if let Ok(dir) = std::env::var("KIKIMIMI_DATA_DIR") {
         return PathBuf::from(dir);
     }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("gijiroku")
+        .join("kikimimi")
 }
 
 /// 既定の待ち受けポート。使用中なら次の番号を順に試す。
@@ -40,7 +41,7 @@ pub fn default_data_dir() -> PathBuf {
 pub const DEFAULT_PORT: u16 = 8765;
 
 async fn bind_listener(bind: std::net::IpAddr) -> anyhow::Result<TcpListener> {
-    if let Some(port) = std::env::var("GIJIROKU_PORT")
+    if let Some(port) = std::env::var("KIKIMIMI_PORT")
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok())
     {
@@ -63,11 +64,11 @@ pub async fn serve() -> anyhow::Result<()> {
     let data_dir = default_data_dir();
     std::fs::create_dir_all(&data_dir).with_context(|| format!("{}", data_dir.display()))?;
     crypto::init(&data_dir)?;
-    let conn = db::open(&data_dir.join("gijiroku.sqlite"))?;
+    let conn = db::open(&data_dir.join("kikimimi.sqlite"))?;
     let (legacy_meetings, legacy_templates) = db::legacy_counts(&conn)?;
     if legacy_meetings + legacy_templates > 0 {
         tracing::warn!(
-            "持ち主が未設定の会議が {legacy_meetings} 件、テンプレートが {legacy_templates} 件あります。会員登録のあと `gijiroku admin assign-legacy <ログインID>` で持ち主を指定してください（誰にも表示されません）"
+            "持ち主が未設定の会議が {legacy_meetings} 件、テンプレートが {legacy_templates} 件あります。会員登録のあと `kikimimi admin assign-legacy <ログインID>` で持ち主を指定してください（誰にも表示されません）"
         );
     }
     let state = AppState::new(conn, data_dir);
@@ -78,7 +79,7 @@ pub async fn serve() -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
     let browser_url = format!("http://127.0.0.1:{}", addr.port());
     tracing::info!("会議支援を起動しました。ブラウザで開くアドレス: {browser_url}");
-    if std::env::var("GIJIROKU_NO_BROWSER").ok().as_deref() != Some("1") {
+    if std::env::var("KIKIMIMI_NO_BROWSER").ok().as_deref() != Some("1") {
         chrome::open(&browser_url);
     } else {
         tracing::info!("ブラウザは自動で開きません。{browser_url} を Chrome で開いてください");
@@ -93,16 +94,16 @@ pub async fn serve() -> anyhow::Result<()> {
 }
 
 fn bind_addr() -> std::net::IpAddr {
-    match std::env::var("GIJIROKU_BIND") {
+    match std::env::var("KIKIMIMI_BIND") {
         Ok(value) => value.parse().unwrap_or_else(|_| {
-            tracing::warn!("GIJIROKU_BIND={value} は不正です。127.0.0.1 で待ち受けます");
+            tracing::warn!("KIKIMIMI_BIND={value} は不正です。127.0.0.1 で待ち受けます");
             std::net::Ipv4Addr::LOCALHOST.into()
         }),
         Err(_) => std::net::Ipv4Addr::LOCALHOST.into(),
     }
 }
 
-/// 運用者のコマンド。`gijiroku admin <操作> ...`
+/// 運用者のコマンド。`kikimimi admin <操作> ...`
 ///
 /// - `list-users`: 会員の一覧
 /// - `assign-legacy <ログインID>`: 会員制より前の会議・テンプレート・索引・共通設定を、その会員に移す
@@ -111,7 +112,7 @@ pub fn admin(args: &[String]) -> anyhow::Result<()> {
     let data_dir = default_data_dir();
     std::fs::create_dir_all(&data_dir)?;
     crypto::init(&data_dir)?;
-    let conn = db::open(&data_dir.join("gijiroku.sqlite"))?;
+    let conn = db::open(&data_dir.join("kikimimi.sqlite"))?;
     let find = |login: &str| -> anyhow::Result<i64> {
         let login = login.trim().to_ascii_lowercase();
         accounts::user_id_by_login(&conn, &login)?
@@ -148,7 +149,7 @@ pub fn admin(args: &[String]) -> anyhow::Result<()> {
             println!("ログイン後、アカウント画面でパスワードを変えるよう本人に伝えてください。");
         }
         _ => anyhow::bail!(
-            "使い方: gijiroku admin list-users | assign-legacy <ログインID> | reset-password <ログインID>"
+            "使い方: kikimimi admin list-users | assign-legacy <ログインID> | reset-password <ログインID>"
         ),
     }
     Ok(())

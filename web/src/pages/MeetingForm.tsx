@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "../api/client";
-import type { Folder, MeetingDetail, Template } from "../api/types";
+import type { Folder, MeetingDetail, Settings, Template } from "../api/types";
 import { pref, PREF_MIC, PREF_TAB, sessionSet } from "../lib/prefs";
 import { useStore } from "../lib/store";
 import { devices, ensureAudio, listDevices, recorderState, secureContextProblem, setCaptureOptions, stopStream } from "../recorder/recorder";
-import { beginMeeting, beginMeetingPaused, saveMeeting } from "../state/actions";
+import { beginMeeting, beginMeetingPaused, keyReady, saveMeeting } from "../state/actions";
 import { guarded, useBusy } from "../state/busy";
 import { openDialog } from "../state/dialog";
 import { emptyForm, formKey, loadForm, saveForm, type MeetingForm as Form } from "../state/draft";
@@ -22,6 +22,8 @@ function fromDetail(detail: MeetingDetail): Form {
     questions: questions.length ? questions : [""],
     minutes: detail.questions.length ? detail.questions.map((q) => (q.minutes ? String(q.minutes) : "")) : [""],
     folderId: detail.meeting.folder_id != null ? String(detail.meeting.folder_id) : "",
+    speech: detail.meeting.speech || "api",
+    transcriptOnly: !!detail.meeting.transcript_only,
   };
 }
 
@@ -39,8 +41,21 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
   const busyName = useBusy();
   const testing = rec.streamOpen && !rec.capturing;
   const problem = secureContextProblem();
+  const speechTouched = useRef(false);
 
   useEffect(() => saveForm(key, form), [key, form]);
+  useEffect(() => {
+    let alive = true;
+    api<Settings>("/api/settings")
+      .then((settings) => {
+        if (!alive || keyReady(settings) || speechTouched.current) return;
+        setForm((current) => (current.speech === "api" ? { ...current, speech: "chrome" } : current));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [key]);
 
   useEffect(() => {
     api<{ templates: Template[] }>("/api/templates")
@@ -115,7 +130,7 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
       const id = saved.meeting.id;
       await api(`/api/meetings/${id}/start`, { method: "POST" });
       await api(`/api/meetings/${id}/pause`, { method: "POST" });
-      sessionSet("gijiroku.openImport", id);
+      sessionSet("kikimimi.openImport", id);
       location.hash = `#/m/${id}`;
     });
 
@@ -249,6 +264,58 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
           <button type="button" className="btn" onClick={() => update({ questions: [...form.questions, ""], minutes: [...form.questions.map((_, i) => form.minutes?.[i] || ""), ""] })}>
             議題を追加
           </button>
+        </fieldset>
+        <fieldset className="field">
+          <legend>文字起こし</legend>
+          <label className="check">
+            <input
+              type="radio"
+              name={`${prefix}-speech`}
+              checked={form.speech === "api"}
+              onChange={() => {
+                speechTouched.current = true;
+                update({ speech: "api" });
+              }}
+            />
+            APIキーで文字起こしする
+          </label>
+          <label className="check">
+            <input
+              type="radio"
+              name={`${prefix}-speech`}
+              checked={form.speech === "chrome"}
+              onChange={() => {
+                speechTouched.current = true;
+                update({ speech: "chrome", transcriptOnly: false });
+              }}
+            />
+            Chrome の音声認識（APIキー不要）
+          </label>
+          <label className="check">
+            <input
+              type="radio"
+              name={`${prefix}-speech`}
+              checked={form.speech === "off"}
+              onChange={() => {
+                speechTouched.current = true;
+                update({ speech: "off", transcriptOnly: false });
+              }}
+            />
+            録音だけ（文字起こしは終了時に選べます）
+          </label>
+          {form.speech === "api" ? (
+            <label className="check">
+              <input type="checkbox" checked={form.transcriptOnly} onChange={(event) => update({ transcriptOnly: event.target.checked })} />
+              文字起こしだけにする（回答やナレッジは付けない）
+            </label>
+          ) : null}
+          <p className="hint">
+            {form.speech === "chrome"
+              ? "Chrome の音声認識だけを使います。APIキーは不要です。端末内の言語パックがあるときは端末内で、無いときは Chrome 標準の音声認識で書き起こします。"
+              : form.speech === "off"
+                ? "録音だけ残します。終了時に API で文字起こしするか、そのまま議事録にするかを選べます。"
+                : "Chrome の速報を出しながら、API で精度の高い文字起こしをします。"}
+          </p>
         </fieldset>
         <fieldset className="field">
           <legend>マイク</legend>

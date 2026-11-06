@@ -4,7 +4,7 @@ use axum::http::Request;
 use tower::ServiceExt;
 
 fn test_state() -> AppState {
-    let dir = std::env::temp_dir().join(format!("gijiroku-app-{}", uuid::Uuid::new_v4().simple()));
+    let dir = std::env::temp_dir().join(format!("kikimimi-app-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
     let conn = db::open(&dir.join("t.sqlite")).unwrap();
     AppState::new(conn, dir)
@@ -31,13 +31,34 @@ fn json_of(bytes: &Bytes) -> Value {
     serde_json::from_slice(bytes).unwrap_or(Value::Null)
 }
 
+fn test_email(login: &str) -> String {
+    let trimmed = login.trim().to_ascii_lowercase();
+    if trimmed.contains('@') {
+        trimmed
+    } else {
+        format!("{trimmed}@example.com")
+    }
+}
+
 async fn signup(state: &AppState, login: &str) -> Client {
+    let email = test_email(login);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/auth/register/code")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"login_id": email, "password": "password-for-test", "invite": "docomo2"}).to_string(),
+        ))
+        .unwrap();
+    let (status, _, bytes) = send(state, request).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    let code = json_of(&bytes)["code"].as_str().unwrap().to_string();
     let request = Request::builder()
         .method("POST")
         .uri("/api/auth/register")
         .header("content-type", "application/json")
         .body(Body::from(
-            json!({"login_id": login, "password": "password-for-test"}).to_string(),
+            json!({"login_id": email, "password": "password-for-test", "code": code, "invite": "docomo2"}).to_string(),
         ))
         .unwrap();
     let (status, headers, bytes) = send(state, request).await;
@@ -123,30 +144,84 @@ async fn register_login_logout_and_password_change() {
     let alice = signup(&state, "  Alice ").await;
     let (status, me) = call(&state, &alice, "GET", "/api/auth/me", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(me["user"]["login_id"], "alice");
+    assert_eq!(me["user"]["login_id"], "alice@example.com");
     assert_eq!(me["user"]["plan"]["code"], "free");
 
-    // 同じID（大文字小文字違い）は登録できない。プランの指定は無視される。
+    // 同じメールアドレス（大文字小文字違い）には確認コードを出さない。
     let request = Request::builder()
         .method("POST")
-        .uri("/api/auth/register")
+        .uri("/api/auth/register/code")
         .header("content-type", "application/json")
-        .body(Body::from(json!({"login_id": "ALICE", "password": "password-for-test", "plan": "pro"}).to_string()))
+        .body(Body::from(json!({"login_id": "Alice@Example.com", "password": "password-for-test", "plan": "pro", "invite": "docomo2"}).to_string()))
         .unwrap();
     let (status, _, bytes) = send(&state, request).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(json_of(&bytes)["code"], "login_taken");
-    for (login, password, code) in [("ab", "password-for-test", "invalid_login_id"), ("bob", "short", "weak_password"), ("carol", "zzzzzzzzzz", "weak_password")] {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/auth/register/code")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"login_id": "ab", "invite": "docomo2"}).to_string()))
+        .unwrap();
+    let (status, _, bytes) = send(&state, request).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_of(&bytes)["code"], "invalid_login_id");
+    for (login, password, code) in [
+        ("bob@example.com", "short", "weak_password"),
+        ("carol@example.com", "zzzzzzzzzz", "weak_password"),
+    ] {
         let request = Request::builder()
             .method("POST")
             .uri("/api/auth/register")
             .header("content-type", "application/json")
-            .body(Body::from(json!({"login_id": login, "password": password}).to_string()))
+            .body(Body::from(json!({"login_id": login, "password": password, "code": "000000", "invite": "docomo2"}).to_string()))
             .unwrap();
         let (status, _, bytes) = send(&state, request).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{login}");
         assert_eq!(json_of(&bytes)["code"], code);
     }
+
+    // 確認コードが違うと登録できない。
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/auth/register/code")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"login_id": "new@example.com", "password": "password-for-test", "invite": "docomo2"}).to_string()))
+        .unwrap();
+    let (status, _, bytes) = send(&state, request).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    let sent_body = json_of(&bytes);
+    let sent = sent_body["code"].as_str().unwrap().to_string();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/auth/register/verify")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"login_id": "new@example.com", "code": sent}).to_string()))
+        .unwrap();
+    let (status, _, bytes) = send(&state, request).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    let wrong = if sent == "000000" { "111111" } else { "000000" };
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/auth/register")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"login_id": "new@example.com", "password": "password-for-test", "code": wrong, "invite": "docomo2"}).to_string()))
+        .unwrap();
+    let (status, _, bytes) = send(&state, request).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_of(&bytes)["code"], "invalid_code");
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/auth/register/code")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"login_id": "gate@example.com", "password": "password-for-test", "invite": "nope"}).to_string(),
+        ))
+        .unwrap();
+    let (status, _, bytes) = send(&state, request).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_of(&bytes)["code"], "invalid_invite");
 
     // 誤ったパスワードは断る。正しければ別のセッションが作られる。
     let login = |password: &str| {
@@ -154,7 +229,7 @@ async fn register_login_logout_and_password_change() {
             .method("POST")
             .uri("/api/auth/login")
             .header("content-type", "application/json")
-            .body(Body::from(json!({"login_id": "alice", "password": password}).to_string()))
+            .body(Body::from(json!({"login_id": "alice@example.com", "password": password}).to_string()))
             .unwrap()
     };
     let (status, _, bytes) = send(&state, login("wrong-password!!")).await;
@@ -183,6 +258,62 @@ async fn register_login_logout_and_password_change() {
     // ログアウトしたセッションは使えない。
     assert_eq!(call(&state, &alice, "POST", "/api/auth/logout", Value::Null).await.0, StatusCode::NO_CONTENT);
     assert_eq!(call(&state, &alice, "GET", "/api/auth/me", Value::Null).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn password_reset_mail_changes_the_password() {
+    let state = test_state();
+    signup(&state, "ada").await;
+    let unknown = Request::builder()
+        .method("POST")
+        .uri("/api/auth/password/forgot")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"login_id": "missing@example.com"}).to_string()))
+        .unwrap();
+    let (status, _, bytes) = send(&state, unknown).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(json_of(&bytes).get("code").is_none());
+
+    let forgot = Request::builder()
+        .method("POST")
+        .uri("/api/auth/password/forgot")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"login_id": "ada@example.com"}).to_string()))
+        .unwrap();
+    let (status, _, bytes) = send(&state, forgot).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    let code = json_of(&bytes)["code"].as_str().unwrap().to_string();
+    let weak = Request::builder()
+        .method("POST")
+        .uri("/api/auth/password/reset")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"login_id": "ada@example.com", "code": code, "password": "short"}).to_string()))
+        .unwrap();
+    let (status, _, bytes) = send(&state, weak).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_of(&bytes)["code"], "weak_password");
+    let reset = Request::builder()
+        .method("POST")
+        .uri("/api/auth/password/reset")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"login_id": "Ada@Example.com", "code": code, "password": "reset-password-1"}).to_string()))
+        .unwrap();
+    let (status, _, bytes) = send(&state, reset).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    let old = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"login_id": "ada@example.com", "password": "password-for-test"}).to_string()))
+        .unwrap();
+    assert_eq!(send(&state, old).await.0, StatusCode::UNAUTHORIZED);
+    let fresh = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"login_id": "ada@example.com", "password": "reset-password-1"}).to_string()))
+        .unwrap();
+    assert_eq!(send(&state, fresh).await.0, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -337,11 +468,11 @@ async fn uploads_and_index_are_personal() {
 }
 
 #[tokio::test]
-async fn monthly_and_concurrent_limits_are_enforced() {
+async fn daily_and_concurrent_limits_are_enforced() {
     let state = test_state();
     let alice = signup(&state, "alice").await;
     let bob = signup(&state, "bob").await;
-    set_limits(&state, json!({"monthly_meetings": 2, "meeting_minutes": 60, "storage_bytes": null, "concurrent_recordings": 1})).await;
+    set_limits(&state, json!({"daily_meetings": 2, "meeting_minutes": 60, "storage_bytes": null, "concurrent_recordings": 1})).await;
     let first = new_live_meeting(&state, &alice, "1").await;
     // 1 件録音中なので、2 件目は同時録音数で止まる。
     let (_, created) = call(&state, &alice, "POST", "/api/meetings", json!({"title": "2", "questions": []})).await;
@@ -358,22 +489,22 @@ async fn monthly_and_concurrent_limits_are_enforced() {
     let (status, body) = call(&state, &alice, "POST", &format!("/api/meetings/{first}/resume"), Value::Null).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["limit"]["item"], "concurrent_recordings");
-    // 今月 2 件開始したので、3 件目は月の上限で止まる。削除しても数は戻らない。
+    // 今日 2 件開始したので、3 件目は日の上限で止まる。削除しても数は戻らない。
     call(&state, &alice, "POST", &format!("/api/meetings/{second}/pause"), Value::Null).await;
     call(&state, &alice, "DELETE", &format!("/api/meetings/{second}"), Value::Null).await;
     let (_, created) = call(&state, &alice, "POST", "/api/meetings", json!({"title": "3", "questions": []})).await;
     let third = created["meeting"]["id"].as_i64().unwrap();
     let (status, body) = call(&state, &alice, "POST", &format!("/api/meetings/{third}/start"), Value::Null).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body["limit"]["item"], "monthly_meetings");
+    assert_eq!(body["limit"]["item"], "daily_meetings");
     assert_eq!(body["limit"]["used"], 2);
     // B の枠は A の利用で減らない。
     new_live_meeting(&state, &bob, "B").await;
     let (_, account) = call(&state, &alice, "GET", "/api/account", Value::Null).await;
-    let monthly = account["usage"].as_array().unwrap().iter().find(|item| item["item"] == "monthly_meetings").unwrap().clone();
-    assert_eq!(monthly["used"], 2);
-    assert_eq!(monthly["limit"], 2);
-    assert!(monthly["period_end"].as_str().is_some());
+    let daily = account["usage"].as_array().unwrap().iter().find(|item| item["item"] == "daily_meetings").unwrap().clone();
+    assert_eq!(daily["used"], 2);
+    assert_eq!(daily["limit"], 2);
+    assert!(daily["period_end"].as_str().is_some());
     // 既存の記録は、上限に達しても閲覧・出力できる。
     assert_eq!(call(&state, &alice, "GET", &format!("/api/meetings/{first}"), Value::Null).await.0, StatusCode::OK);
 }
@@ -382,7 +513,7 @@ async fn monthly_and_concurrent_limits_are_enforced() {
 async fn recording_minutes_and_storage_are_enforced() {
     let state = test_state();
     let alice = signup(&state, "alice").await;
-    set_limits(&state, json!({"monthly_meetings": null, "meeting_minutes": 1, "storage_bytes": 3_000_000, "concurrent_recordings": null})).await;
+    set_limits(&state, json!({"daily_meetings": null, "meeting_minutes": 1, "storage_bytes": 3_000_000, "concurrent_recordings": null})).await;
     let id = new_live_meeting(&state, &alice, "長い").await;
     let half_minute = audio::encode_wav(&vec![0u8; 16_000 * 2 * 30], 16_000);
     assert_eq!(post_wav(&state, &alice, id, 0, half_minute.clone()).await.0, StatusCode::ACCEPTED);
@@ -550,4 +681,65 @@ async fn realtime_captions_follow_plan_and_operator_policy() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (_, settings) = call(&state, &alice, "GET", "/api/settings", Value::Null).await;
     assert_eq!(settings["realtime_allowed"], false);
+}
+
+/// APIキーが無くても Chrome の書き起こしで始められ、終了時に API なしの議事録を選べる。
+#[tokio::test]
+async fn chrome_speech_starts_without_a_key_and_finishes_plain() {
+    let state = test_state();
+    let alice = signup(&state, "ears").await;
+    let (status, created) = call(
+        &state,
+        &alice,
+        "POST",
+        "/api/meetings",
+        json!({"title": "キーなし", "questions": ["予算は？"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = created["meeting"]["id"].as_i64().unwrap();
+    let (status, started) = call(
+        &state,
+        &alice,
+        "POST",
+        &format!("/api/meetings/{id}/start"),
+        json!({"speech": "chrome", "transcript_only": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    assert_eq!(started["meeting"]["speech"], "chrome");
+    let (status, caption) = call(
+        &state,
+        &alice,
+        "POST",
+        &format!("/api/meetings/{id}/captions"),
+        json!({"start_sec": 1.5, "text": "こんにちは"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{caption}");
+    assert_eq!(caption["segment"]["text"], "こんにちは");
+    let (status, _) = call(
+        &state,
+        &alice,
+        "POST",
+        &format!("/api/meetings/{id}/speech"),
+        json!({"speech": "api"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, denied) = call(&state, &alice, "POST", &format!("/api/meetings/{id}/finish"), json!({"close": "api"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{denied}");
+    assert!(denied["error"].as_str().unwrap_or("").contains("APIキー"), "{denied}");
+    let (status, finished) = call(
+        &state,
+        &alice,
+        "POST",
+        &format!("/api/meetings/{id}/finish"),
+        json!({"close": "plain"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{finished}");
+    assert_eq!(finished["meeting"]["finish_requested"], true);
+    assert_eq!(finished["meeting"]["finish_close"], "plain");
+    assert_eq!(finished["meeting"]["speech"], "chrome");
 }

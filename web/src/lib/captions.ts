@@ -1,8 +1,9 @@
 // リアルタイム文字起こし（Chrome の速報字幕, #104）。
-// 正の書き起こしはこれまでどおり区間ごとの AI の文字起こし。ここで作る文字は画面に出すだけで、保存しない。
+// 会議の文字起こしが API のときは、ここは画面の速報だけで保存しない。
+// 会議が Chrome の音声認識のときは、確定した文を保存する（setCaptionPersist）。
 // 既定は端末内の認識（processLocally）だけを使い、音声を端末の外に出さない。
 import { createStore } from "./store";
-import { captionTrack, recorderState, sentSamples } from "../recorder/recorder";
+import { captionTrack, localSeconds, recorderState } from "../recorder/recorder";
 
 export type CaptionMode = "off" | "local" | "cloud";
 
@@ -34,6 +35,15 @@ type RecognitionClass = {
   available?: (options: { langs: string[]; processLocally: boolean }) => Promise<string>;
   install?: (options: { langs: string[]; processLocally: boolean }) => Promise<boolean>;
 };
+
+let persist: ((line: CaptionLine) => void) | null = null;
+let lastAt = -1;
+
+/** Chrome の確定文をサーバへ残す。null なら画面に出すだけ。 */
+export function setCaptionPersist(next: ((line: CaptionLine) => void) | null) {
+  persist = next;
+  lastAt = -1;
+}
 
 function recognitionClass(): RecognitionClass | null {
   const w = window as unknown as { SpeechRecognition?: RecognitionClass; webkitSpeechRecognition?: RecognitionClass };
@@ -70,10 +80,21 @@ let phrases: string[] = [];
 let recognition: Recognition | null = null;
 let wanted = false;
 let restarts = 0;
+let fallbackNote = "";
+let preferTrack = false;
+
+/** 会議の文字起こしに使う Chrome の認識。端末内が使えるときはそれ、無いときは Chrome 標準の音声認識。 */
+export async function chromeCaptionMode(): Promise<CaptionMode> {
+  if (!recognitionClass()) return "off";
+  const local = await captionAvailability("local");
+  return local === "available" ? "local" : "cloud";
+}
 
 /** 会議の画面から設定を渡す。mode が off なら止める。 */
 export function configureCaptions(next: CaptionMode) {
   mode = next;
+  fallbackNote = "";
+  preferTrack = false;
   sync();
 }
 
@@ -108,10 +129,22 @@ function stop() {
   setState({ running: false, interim: "", lines: [] });
 }
 
+function listen(rec: Recognition) {
+  const track = captionTrack();
+  // 端末内認識と、マイクをすでに掴んでいるときは、録音中の音声を渡す。
+  // それ以外の Chrome 標準の認識は、ブラウザがマイクを取る。
+  if (mode === "cloud" && !preferTrack) {
+    rec.start();
+    return;
+  }
+  if (!track) throw new Error("マイクの音がありません");
+  rec.start(track);
+}
+
 function start() {
   const SR = recognitionClass();
-  const track = captionTrack();
-  if (!SR || !track) return;
+  if (!SR) return;
+  if (mode !== "cloud" && !captionTrack()) return;
   wanted = true;
   const rec = new SR();
   rec.lang = LANG;
@@ -134,21 +167,56 @@ function start() {
       const result = event.results[i];
       const text = result[0].transcript.trim();
       if (!text) continue;
-      if (result.isFinal) finals.push({ chunkStart: sentSamples() / 16000, text });
-      else interim += text;
+      if (result.isFinal) {
+        let at = localSeconds();
+        if (at <= lastAt + 0.2) at = lastAt + 0.25;
+        lastAt = at;
+        finals.push({ chunkStart: at, text });
+      } else interim += text;
     }
     const state = captions.get();
-    setState({ interim, lines: finals.length ? [...state.lines, ...finals].slice(-40) : state.lines, problem: "" });
+    setState({ interim, lines: finals.length ? [...state.lines, ...finals].slice(-40) : state.lines, problem: fallbackNote });
+    if (persist) finals.forEach((line) => persist?.(line));
   };
   rec.onerror = (event) => {
+    if (event.error === "no-speech" || event.error === "aborted") return;
+    // 端末内の言語パックが無いときは、Chrome 標準の音声認識で続ける。
+    if (event.error === "language-not-supported" && mode === "local") {
+      mode = "cloud";
+      fallbackNote = "端末内の日本語認識が使えないため、Chrome の音声認識を使っています。";
+      wanted = true;
+      recognition = null;
+      rec.onend = null;
+      try {
+        rec.abort();
+      } catch {
+        // すでに止まっている
+      }
+      setState({ running: false, problem: fallbackNote });
+      setTimeout(() => sync(), 300);
+      return;
+    }
+    if (event.error === "audio-capture" && !preferTrack && captionTrack()) {
+      preferTrack = true;
+      wanted = true;
+      recognition = null;
+      rec.onend = null;
+      try {
+        rec.abort();
+      } catch {
+        // すでに止まっている
+      }
+      setTimeout(() => sync(), 300);
+      return;
+    }
     const reasons: Record<string, string> = {
-      "language-not-supported": "この端末では日本語の端末内認識が使えません（設定で言語パックを入れてください）",
+      "language-not-supported": "この端末では日本語の音声認識が使えません",
       "not-allowed": "音声認識が許可されていません",
       "service-not-allowed": "音声認識が許可されていません",
+      "audio-capture": "マイクを音声認識に渡せません",
       network: "音声認識のサービスに接続できません",
     };
-    if (event.error === "no-speech" || event.error === "aborted") return;
-    setState({ problem: reasons[event.error] || `速報字幕を止めました（${event.error}）` });
+    setState({ problem: reasons[event.error] || `音声認識を止めました（${event.error}）` });
     if (reasons[event.error]) wanted = false;
   };
   rec.onend = () => {
@@ -158,30 +226,51 @@ function start() {
       setTimeout(() => {
         if (wanted && recognition === rec) {
           try {
-            rec.start(captionTrack() || undefined);
+            listen(rec);
           } catch {
             // 始め直せなければ次の録音開始まで待つ
           }
         }
       }, 300);
     } else if (recognition === rec) {
-      setState({ running: false, interim: "" });
+      setState({ running: false, interim: "", problem: fallbackNote });
     }
   };
   try {
-    rec.start(track);
+    listen(rec);
     recognition = rec;
     restarts = 0;
-    setState({ running: true, problem: "" });
+    setState({ running: true, problem: fallbackNote });
   } catch (err) {
-    setState({ running: false, problem: `速報字幕を始められません: ${(err as Error).message}` });
+    if (mode === "local") {
+      mode = "cloud";
+      fallbackNote = "端末内の日本語認識が使えないため、Chrome の音声認識を使っています。";
+      try {
+        rec.processLocally = false;
+        rec.start();
+        recognition = rec;
+        restarts = 0;
+        setState({ running: true, problem: fallbackNote });
+        return;
+      } catch {
+        // 下のメッセージへ
+      }
+    }
+    setState({ running: false, problem: `音声認識を始められません: ${(err as Error).message}` });
   }
 }
 
-/** 録音中で、設定が ON のときだけ動かす。 */
+/** 録音中で、Chrome の音声認識を動かす。 */
 function sync() {
   const capturing = recorderState.get().capturing;
-  const shouldRun = mode !== "off" && capturing && !!captionTrack();
+  const hasEngine = !!recognitionClass();
+  const canHear = mode === "cloud" || !!captionTrack();
+  const shouldRun = mode !== "off" && capturing && hasEngine && canHear;
+  if (mode !== "off" && capturing && !hasEngine) {
+    setState({ running: false, problem: "このブラウザは Chrome の音声認識に対応していません。デスクトップの Chrome で開いてください。" });
+  } else if (mode === "local" && capturing && !captionTrack() && !recognition) {
+    setState({ problem: "音声認識に渡すマイクの音がまだありません。" });
+  }
   if (shouldRun && !recognition) start();
   else if (!shouldRun && recognition) stop();
 }

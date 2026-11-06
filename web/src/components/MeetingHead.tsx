@@ -1,13 +1,15 @@
 import { api } from "../api/client";
-import type { MeetingDetail } from "../api/types";
+import type { MeetingDetail, Settings } from "../api/types";
 import { fmt, fmtLocal } from "../lib/format";
+import { navigate } from "../lib/router";
 import { useStore } from "../lib/store";
 import { queuedFor, recorderState, recordingHere } from "../recorder/recorder";
-import { finishMeeting, pauseMeeting, resumeMeeting } from "../state/actions";
+import { finishMeeting, pauseMeeting, resumeMeeting, transcribeReady } from "../state/actions";
 import { guarded, useBusy } from "../state/busy";
 import { openDialog } from "../state/dialog";
 import { refreshDetail, setDetail } from "../state/meeting";
 import { notify } from "../state/notices";
+import { captions } from "../lib/captions";
 import { Clock, Meter } from "./Meter";
 import type { ReactNode } from "react";
 
@@ -49,6 +51,59 @@ async function editInfo(detail: MeetingDetail) {
   setDetail(await api<MeetingDetail>(`/api/meetings/${meeting.id}`, { method: "PATCH", body: { title: values.title, participants: values.participants } }));
 }
 
+function SpeechLive({ detail }: { detail: MeetingDetail }) {
+  const meeting = detail.meeting;
+  const busyName = useBusy();
+  const live = (meeting.status === "live" || meeting.status === "paused") && !meeting.finish_requested;
+  if (!live) return null;
+  const speech = meeting.speech || "api";
+  const apply = (next: "api" | "chrome" | "off", transcriptOnly = !!meeting.transcript_only) =>
+    guarded("speech", async () => {
+      if (next === "api") {
+        const settings = await api<Settings>("/api/settings");
+        if (!transcribeReady(settings)) {
+          notify("API の文字起こしには、文字起こし用の APIキーが必要です。", "warn");
+          navigate("#/settings");
+          return;
+        }
+      }
+      setDetail(
+        await api<MeetingDetail>(`/api/meetings/${meeting.id}/speech`, {
+          method: "POST",
+          body: { speech: next, transcript_only: next === "api" && transcriptOnly },
+        }),
+      );
+    });
+  return (
+    <fieldset className="speech-live">
+      <legend>録音中の文字起こし</legend>
+      <label className="check">
+        <input type="radio" name={`speech-${meeting.id}`} checked={speech === "api"} disabled={!!busyName} onChange={() => void apply("api")} />
+        APIで文字起こし
+      </label>
+      <label className="check">
+        <input type="radio" name={`speech-${meeting.id}`} checked={speech === "chrome"} disabled={!!busyName} onChange={() => void apply("chrome")} />
+        Chromeのみ（APIキー不要）
+      </label>
+      <label className="check">
+        <input type="radio" name={`speech-${meeting.id}`} checked={speech === "off"} disabled={!!busyName} onChange={() => void apply("off")} />
+        録音だけ
+      </label>
+      {speech === "api" ? (
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={!!meeting.transcript_only}
+            disabled={!!busyName}
+            onChange={(event) => void apply("api", event.target.checked)}
+          />
+          文字起こしのみ
+        </label>
+      ) : null}
+    </fieldset>
+  );
+}
+
 /** 会議の見出し。状態のチップと、状態に合う操作だけを出す。 */
 export function MeetingHead({ detail, extra }: { detail: MeetingDetail; extra?: ReactNode }) {
   const rec = useStore(recorderState);
@@ -65,6 +120,9 @@ export function MeetingHead({ detail, extra }: { detail: MeetingDetail; extra?: 
     meeting.participants ? `参加者${meeting.participants_auto ? "（発言から自動）" : ""}: ${meeting.participants}` : "",
   ].filter(Boolean);
   const id = meeting.id;
+  const speech = meeting.speech || "api";
+  const captionProblem = useStore(captions).problem;
+  const ears = (meeting.status === "live" || meeting.status === "paused") && !meeting.finish_requested;
 
   const buttons: ReactNode[] = [];
   if (meeting.finish_requested && meeting.status !== "wrapping" && meeting.status !== "done") {
@@ -141,9 +199,17 @@ export function MeetingHead({ detail, extra }: { detail: MeetingDetail; extra?: 
           ) : null}
           {meta.length ? <span className="muted">{meta.join(" ・ ")}</span> : null}
         </div>
+        <SpeechLive detail={detail} />
         <p className="muted small lag" aria-live="polite">
-          {lagText(detail, here)}
+          {ears && speech === "chrome"
+            ? "Chrome の音声認識で書き起こしています。APIキーは使っていません。"
+            : ears && speech === "api" && here
+              ? `Chrome の速報を出しています。${lagText(detail, here)}`
+              : ears && speech === "off"
+                ? "録音だけ残しています。文字起こしは終了時に選べます。"
+                : lagText(detail, here)}
         </p>
+        {ears && speech !== "off" && captionProblem ? <p className="muted small">{captionProblem}</p> : null}
         {here && rec.deviceLabel ? (
           <p className="muted small">
             マイク: {rec.deviceLabel}

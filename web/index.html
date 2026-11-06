@@ -9,7 +9,7 @@
     // 描画前にテーマを当て、反対の配色が一瞬出ないようにする。
     (function () {
       var choice = "system";
-      try { choice = localStorage.getItem("gijiroku.theme") || "system"; } catch (e) {}
+      try { choice = localStorage.getItem("kikimimi.theme") || "system"; } catch (e) {}
       var dark = choice === "dark" || (choice === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
       document.documentElement.dataset.theme = dark ? "dark" : "light";
     })();

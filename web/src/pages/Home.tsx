@@ -9,7 +9,7 @@ import { notify } from "../state/notices";
 import { Notices } from "../components/Notices";
 
 const ACTIVE = ["live", "paused", "wrapping"];
-const DRAG_TYPE = "application/x-gijiroku-meeting";
+const DRAG_TYPE = "application/x-kikimimi-meeting";
 
 type RowProps = {
   meeting: Meeting;
@@ -149,8 +149,8 @@ export function Home() {
 
   useEffect(() => {
     const onHome = () => refresh();
-    window.addEventListener("gijiroku:home", onHome);
-    return () => window.removeEventListener("gijiroku:home", onHome);
+    window.addEventListener("kikimimi:home", onHome);
+    return () => window.removeEventListener("kikimimi:home", onHome);
   }, []);
 
   useEffect(() => {
@@ -310,7 +310,8 @@ export function Home() {
       <Notices />
       {!keySet ? (
         <div className="banner">
-          AI の APIキーが未登録です。<a href="#/settings">設定画面</a>で Gemini・OpenAI・Claude のキーを登録すると、文字起こしと要約が使えます。
+          AI の APIキーは未登録です。Chrome の音声認識なら、キーなしで文字起こしできます。要約や、録音からの確定には
+          <a href="#/settings">設定画面</a>でキーを登録してください。
         </div>
       ) : null}
       {list && list.total === 0 ? (

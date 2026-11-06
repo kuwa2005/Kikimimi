@@ -1,10 +1,10 @@
 # Kikimimi（聞き耳）
 
-Kikimimi（キキミミ）は、会議に聞き耳を立てるためのアプリです。録音しながら、リアルタイムに文字起こし・アジェンダ（議題）の進行と回答・結論の候補・社内ナレッジの検索を行い、終了後に議事録（要約）を作ります。会員ごとにデータと API キーを分けて使えます。プログラム名は `gijiroku` です。
+Kikimimi（キキミミ）は、会議に聞き耳を立てるためのアプリです。録音しながら、リアルタイムに文字起こし・アジェンダ（議題）の進行と回答・結論の候補・社内ナレッジの検索を行い、終了後に議事録（要約）を作ります。会員ごとにデータと API キーを分けて使えます。プログラム名は `kikimimi` です。
 
 - 録音はブラウザ（Chrome）が無音の切れ目で区切り（最長 15 秒）、サーバへ送ります。文字起こしは後段の待ち行列で進むため、解析が遅れても録音は止まりません。
 - 文字起こし・回答候補・要約には、会員が自分で登録した **Gemini** か **OpenAI** の API キーを使います（BYOK）。回答候補と要約は **Claude**（Anthropic）でも作れます。Claude は音声を受け付けないため、その場合も文字起こしには Gemini か OpenAI のキーが要ります。Cursor は外部から呼べる文章生成の API が無いため対応していません。社内ナレッジ（自分でアップロードした資料、運用者が許可したフォルダ、または FESS）は社内で検索し、AI に送るのは短い検索語だけです。
-- 登録はログインIDとパスワードだけで、プランは Free です。このサービスの Free プランと、Gemini / OpenAI / Claude の API 料金・利用枠は別です。
+- ログインIDはメールアドレスです。登録は「メールアドレスと招待コード → 6桁の確認コード → パスワード → 利用規約への同意」の順です。暫定の招待コードは `docomo2` です。プランは Free です。このサービスの Free プランと、Gemini / OpenAI / Claude の API 料金・利用枠は別です。
 
 ## 起動
 
@@ -14,13 +14,21 @@ Kikimimi（キキミミ）は、会議に聞き耳を立てるためのアプリ
 docker compose up -d --build app
 ```
 
-`http://127.0.0.1:8765` を Chrome で開き、「新しく登録」からログインIDとパスワードを決めて登録します。設定画面で Gemini・OpenAI・Claude の API キーを登録すると使えます（Claude を選ぶ場合は、文字起こし用に Gemini か OpenAI のキーも登録します）。
+`http://127.0.0.1:8765` を Chrome で開きます。登録とパスワード再設定の手順は次のとおりです。確認メールを送るには、下の SMTP の環境変数が必要です。
+
+1. 「新しく登録」でメールアドレスと招待コード `docomo2` を入れる。
+2. 届いた6桁の数字を入れる。そろうと次へ進む。
+3. ログインパスワードを決める。
+4. 利用規約を確認し、「同意して登録」で会員になる。
+5. 設定画面で Gemini・OpenAI・Claude の API キーを登録する（Claude のときは、文字起こし用に Gemini か OpenAI のキーも登録する）。
+
+パスワードを忘れた場合は、ログイン画面の「再設定用のメール」から、登録済みのメールアドレスへ確認コードを送れます。未登録のアドレスには送りません。画面の案内は、アドレスが登録済みかどうかで文言を変えません。
 
 データの保存先を変える、またはホストの利用者で動かす場合:
 
 ```bash
-GIJIROKU_UID=$(id -u) GIJIROKU_GID=$(id -g) \
-GIJIROKU_HOST_DATA=$HOME/.local/share/gijiroku \
+KIKIMIMI_UID=$(id -u) KIKIMIMI_GID=$(id -g) \
+KIKIMIMI_HOST_DATA=$HOME/.local/share/kikimimi \
 docker compose up -d --build app
 ```
 
@@ -33,7 +41,7 @@ docker compose up -d --build app
 cargo run --release
 ```
 
-Windows では起動すると Chrome がアプリウィンドウで開きます。画面のファイルは `GIJIROKU_WEB_DIR`、実行ファイルの隣の `web/`、`./web/dist` の順に探します。
+Windows では起動すると Chrome がアプリウィンドウで開きます。画面のファイルは `KIKIMIMI_WEB_DIR`、実行ファイルの隣の `web/`、`./web/dist` の順に探します。
 
 ## 会員制以前のデータを移す（運用者）
 
@@ -42,47 +50,56 @@ Windows では起動すると Chrome がアプリウィンドウで開きます�
 移す先の会員が画面から登録したあと、運用者が次を実行します（移す前の DB は `backup/` に自動で残します）。
 
 ```bash
-docker compose exec app gijiroku admin assign-legacy <ログインID>
+docker compose exec app kikimimi admin assign-legacy <ログインID>
 ```
 
 その他の運用者コマンド:
 
 ```bash
-gijiroku admin list-users                 # 会員の一覧
-gijiroku admin reset-password <ログインID> # 仮パスワードを発行し、その会員のセッションをすべて失効させる
+kikimimi admin list-users                 # 会員の一覧
+kikimimi admin reset-password <ログインID> # 仮パスワードを発行し、その会員のセッションをすべて失効させる
 ```
 
-パスワードを忘れた場合、メールでの再設定はありません。本人から依頼を受けた運用者が `reset-password` で仮パスワードを発行し、本人はログイン後にアカウント画面で変更します。
+パスワードを忘れた場合、ログイン画面から登録済みのメールアドレスへ再設定用の確認コードを送れます。届かないときは、運用者が `reset-password` で仮パスワードを発行し、本人はログイン後にアカウント画面で変更します。
 
 ## 環境変数
 
 | 変数 | 既定値 | 内容 |
 |---|---|---|
-| `GIJIROKU_DATA_DIR` | OS のデータフォルダ/gijiroku | DB・録音・アップロードした資料・`secret.key` の保存先 |
-| `GIJIROKU_PORT` | 8765（使用中なら 8766〜8774） | 待ち受けポート。指定したときはその番号だけを使う |
-| `GIJIROKU_BIND` | `127.0.0.1` | 待ち受けアドレス。LAN から使うときは `0.0.0.0`（下記の注意を参照） |
-| `GIJIROKU_WEB_DIR` | 実行ファイルの隣の `web` → `./web/dist` | 画面（ビルド済み）の場所 |
-| `GIJIROKU_KNOWLEDGE_ROOT` | なし | 会員が「サーバ上の資料フォルダ」として指定できる範囲（カンマ区切り）。未設定なら指定できない（アップロードだけ） |
-| `GIJIROKU_FREE_MONTHLY_MEETINGS` | 10 | Free の、月に開始できる会議数（`unlimited` で無制限） |
-| `GIJIROKU_FREE_MEETING_MINUTES` | 600 | Free の、1 会議の録音時間（分）。暫定で 10 時間 |
-| `GIJIROKU_FREE_STORAGE_MB` | 1024 | Free の、録音の保存容量（MB） |
-| `GIJIROKU_FREE_CONCURRENT_RECORDINGS` | 1 | Free の、同時に録音できる会議数 |
-| `GIJIROKU_FREE_REALTIME_CAPTIONS` | 1 | Free でリアルタイム文字起こし（速報字幕）を使えるか。上位プランと差別化するときは `0` |
-| `GIJIROKU_ALLOW_CLOUD_SPEECH` | なし | `1` で、速報字幕に Google のサーバ認識（音声が Google に送られる）を選べるようにする。会社の承認を得てから設定する |
-| `GIJIROKU_USAGE_UTC_OFFSET` | `+09:00` | 月の利用量を区切る時差 |
-| `GIJIROKU_SECURE_COOKIE` | なし | `1` でセッション Cookie に Secure を付ける（https で公開するとき） |
-| `GIJIROKU_TRUST_PROXY` | なし | `1` でリバースプロキシの `X-Forwarded-For` / `X-Forwarded-Proto` を信じる |
-| `GIJIROKU_WORKERS` | 2 | 文字起こしを並行して進める区間数（1〜8） |
-| `GIJIROKU_NO_BROWSER` | なし | `1` で起動時に Chrome を開かない |
-| `GIJIROKU_CHROME` | 自動検出 | Chrome の実行ファイル |
+| `KIKIMIMI_DATA_DIR` | OS のデータフォルダ/kikimimi | DB・録音・アップロードした資料・`secret.key` の保存先 |
+| `KIKIMIMI_PORT` | 8765（使用中なら 8766〜8774） | 待ち受けポート。指定したときはその番号だけを使う |
+| `KIKIMIMI_BIND` | `127.0.0.1` | 待ち受けアドレス。LAN から使うときは `0.0.0.0`（下記の注意を参照） |
+| `KIKIMIMI_WEB_DIR` | 実行ファイルの隣の `web` → `./web/dist` | 画面（ビルド済み）の場所 |
+| `KIKIMIMI_KNOWLEDGE_ROOT` | なし | 会員が「サーバ上の資料フォルダ」として指定できる範囲（カンマ区切り）。未設定なら指定できない（アップロードだけ） |
+| `KIKIMIMI_FREE_DAILY_MEETINGS` | 30 | Free の、1日に開始できる会議数（`unlimited` で無制限。日付は `KIKIMIMI_USAGE_UTC_OFFSET`） |
+| `KIKIMIMI_FREE_MEETING_MINUTES` | 600 | Free の、1 会議の録音時間（分）。暫定で 10 時間 |
+| `KIKIMIMI_FREE_STORAGE_MB` | 1024 | Free の、録音の保存容量（MB） |
+| `KIKIMIMI_FREE_CONCURRENT_RECORDINGS` | 1 | Free の、同時に録音できる会議数 |
+| `KIKIMIMI_FREE_REALTIME_CAPTIONS` | 1 | Free でリアルタイム文字起こし（速報字幕）を使えるか。上位プランと差別化するときは `0` |
+| `KIKIMIMI_ALLOW_CLOUD_SPEECH` | なし | `1` で、速報字幕に Google のサーバ認識（音声が Google に送られる）を選べるようにする。会社の承認を得てから設定する |
+| `KIKIMIMI_USAGE_UTC_OFFSET` | `+09:00` | 月の利用量を区切る時差 |
+| `KIKIMIMI_SECURE_COOKIE` | なし | `1` でセッション Cookie に Secure を付ける（https で公開するとき） |
+| `KIKIMIMI_TRUST_PROXY` | なし | `1` でリバースプロキシの `X-Forwarded-For` / `X-Forwarded-Proto` を信じる |
+| `KIKIMIMI_WORKERS` | 2 | 文字起こしを並行して進める区間数（1〜8） |
+| `KIKIMIMI_NO_BROWSER` | なし | `1` で起動時に Chrome を開かない |
+| `KIKIMIMI_CHROME` | 自動検出 | Chrome の実行ファイル |
 | `TZ` | Docker では `Asia/Tokyo` | エクスポートの日時とファイル名に使う地域時刻 |
+| `KIKIMIMI_SMTP_HOST` | なし | 登録確認メールの SMTP サーバ。未設定なら確認コードを送れない |
+| `KIKIMIMI_SMTP_PORT` | 587（465 のときは暗黙の TLS） | SMTP のポート |
+| `KIKIMIMI_SMTP_TLS` | `starttls`（ポート 465 なら `tls`） | `starttls` / `tls` / `none` |
+| `KIKIMIMI_SMTP_USER` | なし | SMTP の利用者名。空なら認証しない |
+| `KIKIMIMI_SMTP_PASSWORD` | なし | SMTP のパスワード |
+| `KIKIMIMI_SMTP_FROM` | なし | 差出人。例: `会議支援 <noreply@example.com>` |
+| `KIKIMIMI_MAIL_DIR` | なし | SMTP が無いとき、確認コードをこのフォルダへ書く（動作確認用。公開環境では空のまま） |
+
+SMTP の実値は、リポジトリに含めず `.env` に置きます（`.env.example` はキー名だけです）。`docker compose` は起動時に `.env` を読みます。
 
 Free の上限の既定値は、設計と動作確認のための仮の値です。公開前に運用者が決めてください。
 
 ## 使い方の流れ
 
-1. **登録・設定**: ログインIDとパスワードで登録し、設定画面の「AI接続」で Gemini・OpenAI・Claude から選んでキーを登録します（Claude のときは文字起こしに使う Gemini か OpenAI も選びます）。使うモデルは自動で選ばれます。資料をアップロードしたら「索引を作り直す」を押します。
-2. **新しい会議**: タイトル・参加者・アジェンダ（議題と目安時間、テンプレートから選択可）を入れ、マイクを選んで「マイクをテスト」で音量を確認します。「会議開始（録音開始）」で録音を始め、「会議開始（録音一時停止）」なら録音せずに会議を始めます（あとで「再開」や「取り込む…」で録音を足せます）。オンライン会議の相手の声も録る場合は、チェックを入れて会議のタブを「タブの音声も共有する」で共有します。
+1. **登録・設定**: メールアドレスと招待コード `docomo2` を入れ、届いた6桁の数字のあとパスワードを決め、利用規約に同意して登録し、設定画面の「AI接続」で Gemini・OpenAI・Claude から選んでキーを登録します（Claude のときは文字起こしに使う Gemini か OpenAI も選びます）。使うモデルは自動で選ばれます。資料をアップロードしたら「索引を作り直す」を押します。
+2. **新しい会議**: タイトル・参加者・アジェンダ（議題と目安時間、テンプレートから選択可）を入れ、マイクを選んで「マイクをテスト」で音量を確認します。録音中の文字起こしは「APIで文字起こし」「Chromeのみ（APIキー不要）」「録音だけ」から選びます。APIキーが無い会員の既定は Chrome のみです。「会議開始（録音開始）」で録音を始め、「会議開始（録音一時停止）」なら録音せずに会議を始めます（あとで「再開」や「取り込む…」で録音を足せます）。オンライン会議の相手の声も録る場合は、チェックを入れて会議のタブを「タブの音声も共有する」で共有します。
 3. **会議中**: 書き起こし・アジェンダ・関連ナレッジがリアルタイムに更新されます。回答候補には根拠の発言が付き、人が確認した回答は AI に上書きされません。`Ctrl+K`（Mac は `⌘K`）で操作を探せます。
 4. **終了**: 「終了」で録音を止めると、残りの文字起こしのあとに要約を作ります。要約に取りかかる前なら終了を取り消せます。
 5. **完了後**: 要約の編集・作り直し・コピー、書き起こしの修正、時刻をクリックしての再生、範囲（要約のみ／要約＋回答／記録一式）を選んでの書き出しができます。
@@ -144,10 +161,10 @@ Free の上限の既定値は、設計と動作確認のための仮の値です
 
 - 正式な書き起こし・回答・メモ・要約は、これまでどおり区間ごとの AI の文字起こしで作ります。AI の書き起こしが届いた部分の速報は置き換わります。速報は保存しません。
 - 既定は**端末内の認識**だけです（音声は端末の外に出ません）。日本語の言語パックが無い端末では、設定画面から入れられます。「この端末で使えるか確認」で確かめられます。
-- Google のサーバで認識する方式は、運用者が `GIJIROKU_ALLOW_CLOUD_SPEECH=1` を設定した場合だけ選べます（音声が Google に送られるため、会社の承認が要ります）。
+- Google のサーバで認識する方式は、運用者が `KIKIMIMI_ALLOW_CLOUD_SPEECH=1` を設定した場合だけ選べます（音声が Google に送られるため、会社の承認が要ります）。
 - 録音と同じ音（マイク＋共有したタブの音声）を認識します。議題と参加者名を、当てやすくする語として渡します。
 - デスクトップの Chrome だけで動きます。対応していないブラウザ・端末では使えない旨を表示します。
-- **プランでの差別化**: プランの機能 `realtime_captions` で使えるかを決めます。いまは Free でも使えます。上位プランを始めたら `GIJIROKU_FREE_REALTIME_CAPTIONS=0` にします（アカウント画面に使える機能を表示します）。
+- **プランでの差別化**: プランの機能 `realtime_captions` で使えるかを決めます。いまは Free でも使えます。上位プランを始めたら `KIKIMIMI_FREE_REALTIME_CAPTIONS=0` にします（アカウント画面に使える機能を表示します）。
 
 ## ボイスレコーダーの録音・書き起こしの取り込み
 
@@ -172,11 +189,11 @@ Free の上限の既定値は、設計と動作確認のための仮の値です
 
 ### マイクには https が必要です
 
-ブラウザは `http://127.0.0.1` / `http://localhost` 以外の **http** の画面ではマイクを使わせません。別端末から録音する場合は、TLS 終端のリバースプロキシを前に置き、`GIJIROKU_SECURE_COOKIE=1` と `GIJIROKU_TRUST_PROXY=1` を設定してください。例（Caddy、社内 CA の証明書を自動発行）:
+ブラウザは `http://127.0.0.1` / `http://localhost` 以外の **http** の画面ではマイクを使わせません。別端末から録音する場合は、TLS 終端のリバースプロキシを前に置き、`KIKIMIMI_SECURE_COOKIE=1` と `KIKIMIMI_TRUST_PROXY=1` を設定してください。例（Caddy、社内 CA の証明書を自動発行）:
 
 ```
 # Caddyfile
-gijiroku.example.local {
+kikimimi.example.local {
     tls internal
     reverse_proxy 127.0.0.1:8765
 }
@@ -186,7 +203,7 @@ gijiroku.example.local {
 
 ### 公開するときの注意
 
-- 誰でも会員登録できます（登録は IP ごとに 1 時間 5 件、全体で 1 時間 200 件まで）。インターネットに公開せず、信頼できる社内ネットワークで使ってください。
+- 会員登録には暫定の招待コードが必要です。確認コードの送信は、IP ごとに 1 時間 10 件、メールアドレスごとに 1 時間 5 件、全体で 1 時間 200 件までです。インターネットに公開せず、信頼できる社内ネットワークで使ってください。
 - 会員の API キーと FESS トークンは、データフォルダの `secret.key` で暗号化して DB に保存します（XChaCha20-Poly1305）。暗号文は「会員ID＋項目名」に結び付けてあり、別の会員の行や別の項目へ写しても復号できません。画面や API にはキーの値を返しません。
 - `secret.key` を失うとキーを読めなくなり、DB と一緒に漏れるとキーを復号できます。権限を利用者だけにし、DB とは別に保管してください。
 - キーをブラウザ側だけに持たせる方式は採っていません。会議の終了後の自動要約や混雑時の再試行は、ブラウザを閉じたあとにもサーバで動くため、サーバがキーを使える必要があるからです。
@@ -196,7 +213,7 @@ gijiroku.example.local {
 
 データフォルダには次のものがあります。
 
-- `gijiroku.sqlite`（と `-wal` / `-shm`）: 会員・会議・書き起こし・要約・設定
+- `kikimimi.sqlite`（と `-wal` / `-shm`）: 会員・会議・書き起こし・要約・設定
 - `audio/<会議ID>/<開始ミリ秒>.wav`: 録音の区間ファイル（16kHz / モノラル / 16bit）
 - `knowledge/<会員ID>/`: 会員がアップロードした資料
 - `meeting_docs/<会議ID>/`: 会議に添付した顧客資料の原本
@@ -215,8 +232,8 @@ cargo test              # サーバ（Rust）
 Rust や Node が無い環境では、Docker で実行できます。
 
 ```bash
-docker build --target dev -t gijiroku-dev .
-docker run --rm -v "$PWD":/app -v gijiroku-target:/app/target -w /app gijiroku-dev cargo test
+docker build --target dev -t kikimimi-dev .
+docker run --rm -v "$PWD":/app -v kikimimi-target:/app/target -w /app kikimimi-dev cargo test
 docker run --rm -v "$PWD/web":/web -w /web node:22-alpine sh -c "npm ci && npm run build"
 ```
 

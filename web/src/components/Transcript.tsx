@@ -13,12 +13,14 @@ function LiveCaptions({ after }: { after: number }) {
     <div className="captions" aria-live="polite" aria-label="速報字幕">
       {lines.map((line, index) => (
         <p key={index} className="seg caption">
-          <span className="badge">速報</span> {line.text}
+          <span className="badge">速報</span>
+          <span className="seg-text">{line.text}</span>
         </p>
       ))}
       {state.interim ? (
         <p className="seg caption interim">
-          <span className="badge">速報</span> {state.interim}
+          <span className="badge">速報</span>
+          <span className="seg-text">{state.interim}</span>
         </p>
       ) : null}
       {state.problem ? <p className="muted small">{state.problem}</p> : null}

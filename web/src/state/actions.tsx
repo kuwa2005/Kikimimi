@@ -38,10 +38,20 @@ export function keySet(settings: Settings, provider: Settings["provider"]): bool
   return !!settings.api_key_set;
 }
 
+/** 録音を文字にするキーがあるか。Claude のときは文字起こし用の提供元を見る。 */
+export function transcribeReady(settings: Settings): boolean {
+  const ears = settings.provider === "anthropic" ? settings.transcriber || "gemini" : settings.provider;
+  return keySet(settings, ears);
+}
+
+/** 書き起こしを議事録にまとめるキーがあるか。 */
+export function chatReady(settings: Settings): boolean {
+  return keySet(settings, settings.provider);
+}
+
 /** 会議に要るキーがそろっているか。Claude のときは文字起こしに使う提供元のキーも要る。 */
 export function keyReady(settings: Settings): boolean {
-  if (settings.provider === "anthropic") return keySet(settings, "anthropic") && keySet(settings, settings.transcriber || "gemini");
-  return keySet(settings, settings.provider);
+  return chatReady(settings) && transcribeReady(settings);
 }
 
 /** 足りないキーの提供元名（会議の開始前の案内に使う）。 */
@@ -103,9 +113,9 @@ export async function beginMeeting(form: MeetingForm, existingId: number | null)
   const user = currentUser();
   if (!user) throw new Error("ログインしてください");
   const settings = await api<Settings>("/api/settings");
-  if (!keyReady(settings)) {
+  if (form.speech === "api" && !transcribeReady(settings)) {
     setSetupReturn(existingId == null ? "#/new" : `#/m/${existingId}`);
-    notify(`先に ${missingKeyName(settings)} の APIキーを登録してください。登録すると、入力した会議の準備に戻れます。`, "warn", "setup");
+    notify(`先に ${missingKeyName(settings)} の APIキーを登録してください。登録すると、入力した会議の準備に戻れます。Chrome の音声認識なら、キーがなくても始められます。`, "warn", "setup");
     navigate("#/settings");
     return;
   }
@@ -115,7 +125,10 @@ export async function beginMeeting(form: MeetingForm, existingId: number | null)
     if (!rec.capturing) stopStream();
     await ensureAudio();
     const saved = await saveMeeting(form, existingId);
-    started = await api<MeetingDetail>(`/api/meetings/${saved.meeting.id}/start`, { method: "POST" });
+    started = await api<MeetingDetail>(`/api/meetings/${saved.meeting.id}/start`, {
+      method: "POST",
+      body: { speech: form.speech, transcript_only: form.speech === "api" && form.transcriptOnly },
+    });
   } catch (err) {
     // 開始できなかったのにマイクを掴み続けない。
     if (!recorderState.get().capturing) stopStream();
@@ -135,14 +148,17 @@ export async function beginMeeting(form: MeetingForm, existingId: number | null)
 export async function beginMeetingPaused(form: MeetingForm, existingId: number | null) {
   if (!currentUser()) throw new Error("ログインしてください");
   const settings = await api<Settings>("/api/settings");
-  if (!keyReady(settings)) {
+  if (form.speech === "api" && !transcribeReady(settings)) {
     setSetupReturn(existingId == null ? "#/new" : `#/m/${existingId}`);
-    notify(`先に ${missingKeyName(settings)} の APIキーを登録してください。登録すると、入力した会議の準備に戻れます。`, "warn", "setup");
+    notify(`先に ${missingKeyName(settings)} の APIキーを登録してください。登録すると、入力した会議の準備に戻れます。Chrome の音声認識なら、キーがなくても始められます。`, "warn", "setup");
     navigate("#/settings");
     return;
   }
   const saved = await saveMeeting(form, existingId);
-  await api(`/api/meetings/${saved.meeting.id}/start`, { method: "POST" });
+  await api(`/api/meetings/${saved.meeting.id}/start`, {
+    method: "POST",
+    body: { speech: form.speech, transcript_only: form.speech === "api" && form.transcriptOnly },
+  });
   const paused = await api<MeetingDetail>(`/api/meetings/${saved.meeting.id}/pause`, { method: "POST" });
   clearForm(formKey(existingId));
   setDetail(paused);
@@ -170,6 +186,15 @@ export async function resumeMeeting(id: number) {
     throw new Error("別の会議の録音を送信中です。送り終わってから再開してください");
   }
   useSavedTabPref();
+  const open = currentDetail();
+  if (open && open.meeting.id === id && (open.meeting.speech || "api") === "api") {
+    const settings = await api<Settings>("/api/settings");
+    if (!transcribeReady(settings)) {
+      notify("API の文字起こしにはキーが必要です。録音中の切り替えで Chrome の音声認識にするか、設定でキーを登録してください。", "warn");
+      navigate("#/settings");
+      return;
+    }
+  }
   await ensureAudio();
   let detail: MeetingDetail;
   try {
@@ -184,10 +209,31 @@ export async function resumeMeeting(id: number) {
   setDetail(detail);
 }
 
+async function finishKeys(): Promise<{ transcribe: boolean; chat: boolean }> {
+  const settings = await api<Settings>("/api/settings");
+  return { transcribe: transcribeReady(settings), chat: chatReady(settings) };
+}
+
+function finishOptions(keys: { transcribe: boolean; chat: boolean }): { value: string; label: string }[] {
+  return [
+    { value: "api", label: keys.transcribe ? "録音から API で文字起こしを確定し、要約する" : "録音から API で確定する（文字起こし用の APIキーが必要）" },
+    { value: "chrome", label: keys.chat ? "いまの書き起こしを API で議事録にまとめる" : "書き起こしを API でまとめる（まとめる用の APIキーが必要）" },
+    { value: "plain", label: "API を使わず、書き起こしを議事録にする" },
+  ];
+}
+
+function defaultClose(detail: MeetingDetail | null, keys: { transcribe: boolean; chat: boolean }): string {
+  const speech = detail?.meeting.speech || "api";
+  if (speech === "api" && keys.transcribe) return "api";
+  if (keys.chat) return "chrome";
+  return "plain";
+}
+
 export async function finishMeeting(id: number, reason?: string) {
   // 聞き漏らしチェック: まだ終わっていない議題を、終える前に見せる。
   const current = currentDetail();
   const missing = current && current.meeting.id === id ? current.questions.filter((q) => q.status === "open" || (q.status === "draft" && !q.answer.trim())) : [];
+  const keys = await finishKeys();
   const choice = await openDialog({
     title: missing.length ? `まだ終わっていない議題が ${missing.length} 件あります` : "会議を終了しますか？",
     body: (
@@ -204,21 +250,42 @@ export async function finishMeeting(id: number, reason?: string) {
             <p className="small">扱わなくてよい議題は「今回は扱わない」で外せます。議事録には「次回確認すること」として残ります。</p>
           </div>
         ) : null}
-        <p>録音を止めて、残りの文字起こしのあとに要約を作ります。</p>
+        <p>終了のしかたを選んでください。録音は止まります。</p>
         <p className="muted">要約に取りかかる前なら「終了を取り消して録音に戻る」で戻せます。</p>
       </>
     ),
-    confirm: "終了して要約する",
+    fields: [
+      {
+        name: "close",
+        label: "終了のしかた",
+        type: "select",
+        value: defaultClose(current, keys),
+        options: finishOptions(keys),
+      },
+    ],
+    confirm: "終了する",
     cancel: missing.length ? "会議に戻って聞く" : undefined,
     danger: true,
   });
   if (!choice) return;
+  const close = choice.close === "chrome" && !keys.chat ? "plain" : choice.close;
+  if (choice.close === "api" && !keys.transcribe) {
+    notify("音声認識の確定には、文字起こし用のAPIキーが必要です。", "warn");
+    navigate("#/settings");
+    return;
+  }
   if (recordingHere(id)) {
     haltCapture();
     if (!(await drainOrAsk())) return;
   }
-  setDetail(await api<MeetingDetail>(`/api/meetings/${id}/finish`, { method: "POST" }));
-  notify("録音を止めました。残りの文字起こしと要約を進めています。", "info");
+  setDetail(await api<MeetingDetail>(`/api/meetings/${id}/finish`, { method: "POST", body: { close } }));
+  const done =
+    close === "plain"
+      ? "録音を止めました。API は使わず、書き起こしから議事録を組み立てます。"
+      : close === "chrome"
+        ? "録音を止めました。いまの書き起こしを API で議事録にまとめています。"
+        : "録音を止めました。録音から文字起こしを確定し、要約を進めています。";
+  notify(done, "info");
 }
 
 export async function deleteMeeting(meeting: Meeting) {
@@ -299,7 +366,7 @@ export async function exportMarkdown(id: number, scope: string) {
   const response = await request(`/api/meetings/${id}/export?scope=${scope}`);
   const disposition = response.headers.get("content-disposition") || "";
   const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/);
-  const name = encoded ? decodeURIComponent(encoded[1]) : "gijiroku.md";
+  const name = encoded ? decodeURIComponent(encoded[1]) : "kikimimi.md";
   const blob = new Blob([await response.text()], { type: "text/markdown" });
   const link = document.createElement("a");
   const url = URL.createObjectURL(blob);

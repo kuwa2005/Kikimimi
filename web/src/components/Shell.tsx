@@ -30,7 +30,7 @@ export function Shell({ route, children, onCommand }: { route: Route; children: 
           onClick={() => {
             // ホームを開いているときに押したら、一覧を読み直して先頭へ戻る。
             if (location.hash === "#/" || location.hash === "") {
-              window.dispatchEvent(new Event("gijiroku:home"));
+              window.dispatchEvent(new Event("kikimimi:home"));
               document.getElementById("main")?.scrollTo({ top: 0 });
               window.scrollTo({ top: 0 });
             }

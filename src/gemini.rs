@@ -145,9 +145,9 @@ pub fn is_transient(message: &str) -> bool {
         || message.contains("時間内に応答しませんでした")
 }
 
-/// API の接続先。テストでは模擬サーバに向ける（`GIJIROKU_GEMINI_BASE`）。
+/// API の接続先。テストでは模擬サーバに向ける（`KIKIMIMI_GEMINI_BASE`）。
 pub fn base_url() -> String {
-    std::env::var("GIJIROKU_GEMINI_BASE")
+    std::env::var("KIKIMIMI_GEMINI_BASE")
         .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta".into())
 }
 

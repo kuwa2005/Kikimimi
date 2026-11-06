@@ -5,24 +5,31 @@ services:
       target: runtime
     ports:
       - "8765:8765"
-    user: "${GIJIROKU_UID:-65532}:${GIJIROKU_GID:-65532}"
+    user: "${KIKIMIMI_UID:-65532}:${KIKIMIMI_GID:-65532}"
     environment:
-      GIJIROKU_BIND: 0.0.0.0
-      GIJIROKU_PORT: "8765"
-      GIJIROKU_DATA_DIR: /data
-      GIJIROKU_KNOWLEDGE_ROOT: /knowledge
-      GIJIROKU_NO_BROWSER: "1"
-      GIJIROKU_TRUST_PROXY: ${GIJIROKU_TRUST_PROXY:-0}
-      GIJIROKU_SECURE_COOKIE: ${GIJIROKU_SECURE_COOKIE:-0}
+      KIKIMIMI_BIND: 0.0.0.0
+      KIKIMIMI_PORT: "8765"
+      KIKIMIMI_DATA_DIR: /data
+      KIKIMIMI_KNOWLEDGE_ROOT: /knowledge
+      KIKIMIMI_NO_BROWSER: "1"
+      KIKIMIMI_TRUST_PROXY: ${KIKIMIMI_TRUST_PROXY:-0}
+      KIKIMIMI_SECURE_COOKIE: ${KIKIMIMI_SECURE_COOKIE:-0}
       # Free プランの上限（仮の値）。unlimited で無制限
-      GIJIROKU_FREE_MONTHLY_MEETINGS: ${GIJIROKU_FREE_MONTHLY_MEETINGS:-10}
-      GIJIROKU_FREE_MEETING_MINUTES: ${GIJIROKU_FREE_MEETING_MINUTES:-600}
-      GIJIROKU_FREE_STORAGE_MB: ${GIJIROKU_FREE_STORAGE_MB:-1024}
-      GIJIROKU_FREE_CONCURRENT_RECORDINGS: ${GIJIROKU_FREE_CONCURRENT_RECORDINGS:-1}
-      GIJIROKU_FREE_REALTIME_CAPTIONS: ${GIJIROKU_FREE_REALTIME_CAPTIONS:-1}
+      KIKIMIMI_FREE_DAILY_MEETINGS: ${KIKIMIMI_FREE_DAILY_MEETINGS:-30}
+      KIKIMIMI_FREE_MEETING_MINUTES: ${KIKIMIMI_FREE_MEETING_MINUTES:-600}
+      KIKIMIMI_FREE_STORAGE_MB: ${KIKIMIMI_FREE_STORAGE_MB:-1024}
+      KIKIMIMI_FREE_CONCURRENT_RECORDINGS: ${KIKIMIMI_FREE_CONCURRENT_RECORDINGS:-1}
+      KIKIMIMI_FREE_REALTIME_CAPTIONS: ${KIKIMIMI_FREE_REALTIME_CAPTIONS:-1}
+      KIKIMIMI_SMTP_HOST: ${KIKIMIMI_SMTP_HOST:-}
+      KIKIMIMI_SMTP_PORT: ${KIKIMIMI_SMTP_PORT:-587}
+      KIKIMIMI_SMTP_TLS: ${KIKIMIMI_SMTP_TLS:-}
+      KIKIMIMI_SMTP_USER: ${KIKIMIMI_SMTP_USER:-}
+      KIKIMIMI_SMTP_PASSWORD: ${KIKIMIMI_SMTP_PASSWORD:-}
+      KIKIMIMI_SMTP_FROM: ${KIKIMIMI_SMTP_FROM:-}
+      KIKIMIMI_MAIL_DIR: ${KIKIMIMI_MAIL_DIR:-}
       TZ: ${TZ:-Asia/Tokyo}
     volumes:
-      - ${GIJIROKU_HOST_DATA:-gijiroku-data}:/data
+      - ${KIKIMIMI_HOST_DATA:-kikimimi-data}:/data
       - ./knowledge:/knowledge:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -42,16 +49,23 @@ services:
     ports:
       - "127.0.0.1:8765:8765"
     environment:
-      GIJIROKU_BIND: 0.0.0.0
-      GIJIROKU_PORT: "8765"
-      GIJIROKU_DATA_DIR: /data
-      GIJIROKU_KNOWLEDGE_ROOT: /knowledge
-      GIJIROKU_WEB_DIR: /app/web/dist
-      GIJIROKU_NO_BROWSER: "1"
+      KIKIMIMI_BIND: 0.0.0.0
+      KIKIMIMI_PORT: "8765"
+      KIKIMIMI_DATA_DIR: /data
+      KIKIMIMI_KNOWLEDGE_ROOT: /knowledge
+      KIKIMIMI_WEB_DIR: /app/web/dist
+      KIKIMIMI_NO_BROWSER: "1"
+      KIKIMIMI_SMTP_HOST: ${KIKIMIMI_SMTP_HOST:-}
+      KIKIMIMI_SMTP_PORT: ${KIKIMIMI_SMTP_PORT:-587}
+      KIKIMIMI_SMTP_TLS: ${KIKIMIMI_SMTP_TLS:-}
+      KIKIMIMI_SMTP_USER: ${KIKIMIMI_SMTP_USER:-}
+      KIKIMIMI_SMTP_PASSWORD: ${KIKIMIMI_SMTP_PASSWORD:-}
+      KIKIMIMI_SMTP_FROM: ${KIKIMIMI_SMTP_FROM:-}
+      KIKIMIMI_MAIL_DIR: ${KIKIMIMI_MAIL_DIR:-}
       TZ: ${TZ:-Asia/Tokyo}
     volumes:
       - .:/app
-      - gijiroku-data:/data
+      - kikimimi-data:/data
       - ./knowledge:/knowledge:ro
       - cargo-registry:/usr/local/cargo/registry
     extra_hosts:
@@ -59,5 +73,7 @@ services:
     working_dir: /app
 
 volumes:
-  gijiroku-data:
+  kikimimi-data:
+    name: kikimimi_kikimimi-data
+    external: true
   cargo-registry:

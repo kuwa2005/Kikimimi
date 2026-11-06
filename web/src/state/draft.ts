@@ -10,14 +10,18 @@ export type MeetingForm = {
   minutes?: string[];
   /** 新しい会議を入れるフォルダ（"" はフォルダなし）。作成時だけ使う。 */
   folderId?: string;
+  /** 録音中の文字起こし。api は APIキー、chrome は Chrome の音声認識、off は録音だけ。 */
+  speech: "api" | "chrome" | "off";
+  /** API の文字起こしを、回答やナレッジを付けずに文字だけにする。 */
+  transcriptOnly: boolean;
 };
 
 export function emptyForm(): MeetingForm {
   // ホームでフォルダを開いていたら、そのフォルダを最初から選んでおく。
-  return { title: "", participants: "", templateId: "", questions: [""], folderId: homeFolder() };
+  return { title: "", participants: "", templateId: "", questions: [""], folderId: homeFolder(), speech: "api", transcriptOnly: false };
 }
 
-const HOME_FOLDER = "gijiroku.homeFolder";
+const HOME_FOLDER = "kikimimi.homeFolder";
 
 /** ホームで開いているフォルダ（"" はすべて、"none" はフォルダなし、数字はフォルダ）。 */
 export function homeFolder(): string {
@@ -34,13 +38,13 @@ export function setHomeFolder(value: string) {
 }
 
 export function formKey(meetingId: number | null): string {
-  return meetingId == null ? "gijiroku.form.new" : `gijiroku.form.${meetingId}`;
+  return meetingId == null ? "kikimimi.form.new" : `kikimimi.form.${meetingId}`;
 }
 
 export function loadForm(key: string): MeetingForm | null {
   const saved = sessionGet<MeetingForm>(key);
   if (!saved || !Array.isArray(saved.questions)) return null;
-  return saved;
+  return { ...emptyForm(), ...saved, speech: saved.speech || "api", transcriptOnly: !!saved.transcriptOnly };
 }
 
 export function saveForm(key: string, form: MeetingForm) {
@@ -51,7 +55,7 @@ export function clearForm(key: string) {
   sessionRemove(key);
 }
 
-const SETUP_RETURN = "gijiroku.setupReturn";
+const SETUP_RETURN = "kikimimi.setupReturn";
 
 /** 初回設定へ案内したとき、設定が済んだら戻る先。 */
 export function setSetupReturn(hash: string) {

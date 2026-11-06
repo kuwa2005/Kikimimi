@@ -1,6 +1,6 @@
 //! 会員・セッション・プラン・利用量。
 //!
-//! - 登録はログインIDとパスワードだけ。プランはサーバが必ず Free を割り当てる。
+//! - 新規登録のログインIDはメールアドレス。確認コードを照合してから会員を作る。プランはサーバが必ず Free を割り当てる。
 //! - パスワードは Argon2id（個別の salt）で保存し、セッションはトークンのハッシュだけを保存する。
 //! - 上限の判定は DB のトランザクション（IMMEDIATE）の中で行い、同時の操作でも超えない。
 
@@ -19,12 +19,57 @@ use crate::db::now_stamp;
 pub const SESSION_DAYS: i64 = 30;
 pub const FREE: &str = "free";
 
+#[cfg_attr(not(test), allow(dead_code))]
 const RESERVED: &[&str] = &[
-    "admin", "administrator", "root", "system", "gijiroku", "api", "support", "help", "owner",
+    "admin", "administrator", "root", "system", "gijiroku", "kikimimi", "api", "support", "help", "owner",
     "operator", "null", "undefined", "login", "logout", "register", "settings", "account", "free",
 ];
 
-/// 入力のログインIDを正規化する。規則に合わなければエラーコードを返す。
+/// 登録に使うメールアドレスを正規化する。規則に合わなければエラーコードを返す。
+pub fn normalize_email(raw: &str) -> Result<String, &'static str> {
+    let email = raw.trim().to_ascii_lowercase();
+    if email.len() > 254 || !email.is_ascii() {
+        return Err("invalid_login_id");
+    }
+    let Some((local, domain)) = email.split_once('@') else {
+        return Err("invalid_login_id");
+    };
+    if local.is_empty()
+        || local.len() > 64
+        || local.starts_with('.')
+        || local.ends_with('.')
+        || local.contains("..")
+    {
+        return Err("invalid_login_id");
+    }
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() < 2
+        || labels.iter().any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        })
+    {
+        return Err("invalid_login_id");
+    }
+    let local_ok = local
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "._+-".contains(ch));
+    if !local_ok {
+        return Err("invalid_login_id");
+    }
+    Ok(email)
+}
+
+/// 暫定の招待コード。前後の空白は無視し、大文字小文字は区別する。
+pub fn invite_matches(raw: &str) -> bool {
+    same_text(raw.trim(), "docomo2")
+}
+
+/// 以前からのログインIDを正規化する。規則に合わなければエラーコードを返す。
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn normalize_login_id(raw: &str) -> Result<String, &'static str> {
     let id = raw.trim().to_ascii_lowercase();
     let ok_len = (3..=32).contains(&id.chars().count());
@@ -89,6 +134,167 @@ pub struct User {
     pub login_id: String,
     pub created_at: String,
     pub plan: PlanRef,
+}
+
+pub const SIGNUP_CODE_MINUTES: i64 = 10;
+const SIGNUP_ATTEMPTS: i64 = 5;
+
+/// 先頭が 0 のこともある、6桁の確認コード。
+pub fn new_signup_code() -> String {
+    loop {
+        let n = u32::from_le_bytes(crypto::random_bytes::<4>());
+        if n < 4_000_000_000 {
+            return format!("{:06}", n % 1_000_000);
+        }
+    }
+}
+
+fn signup_code_hash(salt: &str, code: &str) -> String {
+    crypto::sha256_hex(&format!("{salt}:{code}"))
+}
+
+fn same_text(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.bytes().zip(right.bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+/// このメールアドレスの確認コードを置き換える。古いコードは使えなくなる。
+pub fn store_signup_code(conn: &Connection, email: &str, code: &str, password_hash: &str) -> Result<()> {
+    let salt = crypto::random_token();
+    let expires = (chrono::Utc::now() + chrono::Duration::minutes(SIGNUP_CODE_MINUTES))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    conn.execute(
+        "INSERT INTO signup_codes (email, salt, code_hash, password_hash, expires_at, attempts, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)
+         ON CONFLICT(email) DO UPDATE SET
+           salt=excluded.salt,
+           code_hash=excluded.code_hash,
+           password_hash=excluded.password_hash,
+           expires_at=excluded.expires_at,
+           attempts=0,
+           created_at=excluded.created_at",
+        params![
+            email,
+            salt,
+            signup_code_hash(&salt, code),
+            password_hash,
+            expires,
+            now_stamp()
+        ],
+    )?;
+    Ok(())
+}
+
+/// 確認コードが一致するかを見る。成功してもコードは消さない。
+/// 不一致は試行回数を増やし、期限切れと回数超過はコードを消す。
+pub fn match_signup_code(conn: &Connection, email: &str, code: &str) -> Result<Result<(), &'static str>> {
+    let row = conn
+        .query_row(
+            "SELECT salt, code_hash, expires_at, attempts FROM signup_codes WHERE email=?1",
+            [email],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((salt, code_hash, expires_at, attempts)) = row else {
+        return Ok(Err("invalid_code"));
+    };
+    if expires_at.as_str() <= now_stamp().as_str() {
+        delete_signup_code(conn, email)?;
+        return Ok(Err("code_expired"));
+    }
+    if attempts >= SIGNUP_ATTEMPTS {
+        delete_signup_code(conn, email)?;
+        return Ok(Err("code_locked"));
+    }
+    if !same_text(&signup_code_hash(&salt, code), &code_hash) {
+        let next = attempts + 1;
+        if next >= SIGNUP_ATTEMPTS {
+            delete_signup_code(conn, email)?;
+            return Ok(Err("code_locked"));
+        }
+        conn.execute(
+            "UPDATE signup_codes SET attempts=?1 WHERE email=?2",
+            params![next, email],
+        )?;
+        return Ok(Err("invalid_code"));
+    }
+    Ok(Ok(()))
+}
+
+pub fn delete_signup_code(conn: &Connection, email: &str) -> Result<()> {
+    conn.execute("DELETE FROM signup_codes WHERE email=?1", [email])?;
+    Ok(())
+}
+
+/// パスワード再設定の確認コードを置き換える。
+pub fn store_reset_code(conn: &Connection, email: &str, code: &str) -> Result<()> {
+    let salt = crypto::random_token();
+    let expires = (chrono::Utc::now() + chrono::Duration::minutes(SIGNUP_CODE_MINUTES))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    conn.execute(
+        "INSERT INTO reset_codes (email, salt, code_hash, expires_at, attempts, created_at)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5)
+         ON CONFLICT(email) DO UPDATE SET
+           salt=excluded.salt,
+           code_hash=excluded.code_hash,
+           expires_at=excluded.expires_at,
+           attempts=0,
+           created_at=excluded.created_at",
+        params![email, salt, signup_code_hash(&salt, code), expires, now_stamp()],
+    )?;
+    Ok(())
+}
+
+/// 再設定コードが一致したら Ok(Ok(())。不一致は試行回数を増やす。
+pub fn match_reset_code(conn: &Connection, email: &str, code: &str) -> Result<Result<(), &'static str>> {
+    let row = conn
+        .query_row(
+            "SELECT salt, code_hash, expires_at, attempts FROM reset_codes WHERE email=?1",
+            [email],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?)),
+        )
+        .optional()?;
+    let Some((salt, code_hash, expires_at, attempts)) = row else {
+        return Ok(Err("invalid_code"));
+    };
+    if expires_at.as_str() <= now_stamp().as_str() {
+        delete_reset_code(conn, email)?;
+        return Ok(Err("code_expired"));
+    }
+    if attempts >= SIGNUP_ATTEMPTS {
+        delete_reset_code(conn, email)?;
+        return Ok(Err("code_locked"));
+    }
+    if !same_text(&signup_code_hash(&salt, code), &code_hash) {
+        let next = attempts + 1;
+        if next >= SIGNUP_ATTEMPTS {
+            delete_reset_code(conn, email)?;
+            return Ok(Err("code_locked"));
+        }
+        conn.execute("UPDATE reset_codes SET attempts=?1 WHERE email=?2", params![next, email])?;
+        return Ok(Err("invalid_code"));
+    }
+    Ok(Ok(()))
+}
+
+pub fn delete_reset_code(conn: &Connection, email: &str) -> Result<()> {
+    conn.execute("DELETE FROM reset_codes WHERE email=?1", [email])?;
+    Ok(())
 }
 
 /// 新しい会員を作る。ログインIDが使われていれば Ok(None)。
@@ -256,7 +462,7 @@ pub fn purge_expired_sessions(conn: &Connection) -> Result<()> {
 /// 未設定が意図せず無制限にならないようにする。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
-    pub monthly_meetings: Option<i64>,
+    pub daily_meetings: Option<i64>,
     pub meeting_minutes: Option<i64>,
     pub storage_bytes: Option<i64>,
     pub concurrent_recordings: Option<i64>,
@@ -267,7 +473,7 @@ pub struct Limits {
 impl Limits {
     fn to_json(&self) -> Value {
         json!({
-            "monthly_meetings": self.monthly_meetings,
+            "daily_meetings": self.daily_meetings,
             "meeting_minutes": self.meeting_minutes,
             "storage_bytes": self.storage_bytes,
             "concurrent_recordings": self.concurrent_recordings,
@@ -286,7 +492,7 @@ impl Limits {
             }
         };
         Limits {
-            monthly_meetings: read("monthly_meetings"),
+            daily_meetings: read("daily_meetings"),
             meeting_minutes: read("meeting_minutes"),
             storage_bytes: read("storage_bytes"),
             concurrent_recordings: read("concurrent_recordings"),
@@ -313,13 +519,13 @@ pub fn free_limits_from_env() -> Limits {
         }
     }
     Limits {
-        monthly_meetings: read("GIJIROKU_FREE_MONTHLY_MEETINGS", 10, 1),
+        daily_meetings: read("KIKIMIMI_FREE_DAILY_MEETINGS", 30, 1),
         // 暫定で 10 時間（#102）。有料プランを始めるときに見直す。
-        meeting_minutes: read("GIJIROKU_FREE_MEETING_MINUTES", 600, 1),
-        storage_bytes: read("GIJIROKU_FREE_STORAGE_MB", 1024, 1024 * 1024),
-        concurrent_recordings: read("GIJIROKU_FREE_CONCURRENT_RECORDINGS", 1, 1),
+        meeting_minutes: read("KIKIMIMI_FREE_MEETING_MINUTES", 600, 1),
+        storage_bytes: read("KIKIMIMI_FREE_STORAGE_MB", 1024, 1024 * 1024),
+        concurrent_recordings: read("KIKIMIMI_FREE_CONCURRENT_RECORDINGS", 1, 1),
         // リアルタイム文字起こし。いまは Free でも使える。上位プランを始めたら 0 にする（#104）。
-        realtime_captions: std::env::var("GIJIROKU_FREE_REALTIME_CAPTIONS")
+        realtime_captions: std::env::var("KIKIMIMI_FREE_REALTIME_CAPTIONS")
             .map(|value| !matches!(value.trim(), "0" | "false" | "off" | "no"))
             .unwrap_or(true),
     }
@@ -404,28 +610,27 @@ impl fmt::Display for LimitExceeded {
 
 impl std::error::Error for LimitExceeded {}
 
-/// 月の集計に使う時差。`GIJIROKU_USAGE_UTC_OFFSET`（既定 +09:00）。
+/// 集計日の時差。`KIKIMIMI_USAGE_UTC_OFFSET`（既定 +09:00）。
 fn usage_offset() -> chrono::FixedOffset {
-    std::env::var("GIJIROKU_USAGE_UTC_OFFSET")
+    std::env::var("KIKIMIMI_USAGE_UTC_OFFSET")
         .ok()
         .and_then(|value| value.parse::<chrono::FixedOffset>().ok())
         .unwrap_or_else(|| chrono::FixedOffset::east_opt(9 * 3600).expect("+09:00"))
 }
 
-/// いまの集計月（`2026-11`）と、その終わり（翌月 1 日 0 時の UTC 時刻）。
+/// いまの集計日（`2026-11-02`、`KIKIMIMI_USAGE_UTC_OFFSET` の日付）と、その終わり（翌日 0 時の UTC 時刻）。
 pub fn current_period() -> (String, String) {
     use chrono::{Datelike, TimeZone};
     let offset = usage_offset();
     let now = chrono::Utc::now().with_timezone(&offset);
-    let (year, month) = (now.year(), now.month());
-    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
-    let end = offset
-        .with_ymd_and_hms(next_year, next_month, 1, 0, 0, 0)
+    let (year, month, day) = (now.year(), now.month(), now.day());
+    let start = offset
+        .with_ymd_and_hms(year, month, day, 0, 0, 0)
         .single()
-        .expect("月初")
-        .with_timezone(&chrono::Utc);
+        .expect("当日の始まり");
+    let end = (start + chrono::Duration::days(1)).with_timezone(&chrono::Utc);
     (
-        format!("{year:04}-{month:02}"),
+        format!("{year:04}-{month:02}-{day:02}"),
         end.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
     )
 }
@@ -467,10 +672,10 @@ pub fn usage(conn: &Connection, user_id: i64, limits: &Limits) -> Result<Vec<Usa
     let (period, period_end) = current_period();
     Ok(vec![
         UsageItem {
-            item: "monthly_meetings",
-            label: "今月開始した会議",
+            item: "daily_meetings",
+            label: "今日開始した会議",
             used: Some(count_meeting_starts(conn, user_id, &period)?),
-            limit: limits.monthly_meetings,
+            limit: limits.daily_meetings,
             unit: "件",
             period_end: Some(period_end),
         },
@@ -513,7 +718,7 @@ fn exceeded(item: &'static str, label: &'static str, used: i64, limit: i64, unit
     .into()
 }
 
-/// 会議の開始（下書き → 録音中）。同時録音数と今月の会議数を確かめてから計上する。
+/// 会議の開始（下書き → 録音中）。同時録音数と今日の会議数を確かめてから計上する。
 /// 開始は下書きからの一度しか起こらず（呼び出し側が状態を確かめる）、IMMEDIATE のトランザクションで
 /// 直列になるので、二重には数えない。会議 ID は削除後に使い回されることがあるため、記録のキーには使わない。
 pub fn gate_start(conn: &Connection, user_id: i64, meeting_id: i64, limits: &Limits) -> Result<()> {
@@ -524,10 +729,10 @@ pub fn gate_start(conn: &Connection, user_id: i64, meeting_id: i64, limits: &Lim
         }
     }
     let (period, period_end) = current_period();
-    if let Some(limit) = limits.monthly_meetings {
+    if let Some(limit) = limits.daily_meetings {
         let used = count_meeting_starts(conn, user_id, &period)?;
         if used >= limit {
-            return Err(exceeded("monthly_meetings", "今月開始した会議", used, limit, "件", Some(period_end)));
+            return Err(exceeded("daily_meetings", "今日開始した会議", used, limit, "件", Some(period_end)));
         }
     }
     conn.execute(
@@ -588,6 +793,14 @@ mod tests {
         assert_eq!(normalize_login_id("admin"), Err("invalid_login_id"));
         assert_eq!(normalize_login_id("_x1"), Err("invalid_login_id"));
         assert_eq!(normalize_login_id("田中"), Err("invalid_login_id"));
+        assert_eq!(normalize_email("  Ada@Example.com "), Ok("ada@example.com".into()));
+        assert_eq!(normalize_email("a.b+c@example.co.jp"), Ok("a.b+c@example.co.jp".into()));
+        assert!(normalize_email("ada").is_err());
+        assert!(normalize_email("ada@localhost").is_err());
+        assert_eq!(normalize_email("a@b.c"), Ok("a@b.c".into()));
+        assert!(invite_matches(" docomo2 "));
+        assert!(!invite_matches("Docomo2"));
+        assert!(!invite_matches("docomo"));
         assert!(check_password("short").is_err());
         assert!(check_password("1234567").is_err(), "7 文字は短い");
         assert!(check_password("12345678").is_ok(), "数字だけでも 8 文字ならよい");
@@ -608,16 +821,16 @@ mod tests {
 
     #[test]
     fn missing_limit_is_not_unlimited() {
-        let limits = Limits::from_json(r#"{"monthly_meetings": null, "meeting_minutes": 60}"#);
-        assert_eq!(limits.monthly_meetings, None);
+        let limits = Limits::from_json(r#"{"daily_meetings": null, "meeting_minutes": 60}"#);
+        assert_eq!(limits.daily_meetings, None);
         assert_eq!(limits.meeting_minutes, Some(60));
         assert_eq!(limits.storage_bytes, Some(0));
     }
 
     #[test]
-    fn period_end_is_the_next_month() {
+    fn period_end_is_the_next_day() {
         let (period, end) = current_period();
-        assert_eq!(period.len(), 7);
-        assert!(end.ends_with("T15:00:00Z") || std::env::var("GIJIROKU_USAGE_UTC_OFFSET").is_ok());
+        assert_eq!(period.len(), 10);
+        assert!(end.ends_with("T15:00:00Z") || std::env::var("KIKIMIMI_USAGE_UTC_OFFSET").is_ok());
     }
 }

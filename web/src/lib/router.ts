@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-// ハッシュでの画面遷移。#/、#/new、#/m/:id、#/settings、#/account、#/login、#/register
+// ハッシュでの画面遷移。#/、#/new、#/m/:id、#/settings、#/account、#/login、#/register、#/reset
 export type Route =
   | { name: "home" }
   | { name: "new" }
@@ -9,6 +9,7 @@ export type Route =
   | { name: "account" }
   | { name: "login" }
   | { name: "register" }
+  | { name: "reset" }
   | { name: "unknown" };
 
 export function parseHash(hash: string): Route {
@@ -19,6 +20,7 @@ export function parseHash(hash: string): Route {
   if (value === "#/account") return { name: "account" };
   if (value === "#/login") return { name: "login" };
   if (value === "#/register") return { name: "register" };
+  if (value === "#/reset") return { name: "reset" };
   const meeting = value.match(/^#\/m\/(\d+)$/);
   if (meeting) return { name: "meeting", id: Number(meeting[1]) };
   return { name: "unknown" };

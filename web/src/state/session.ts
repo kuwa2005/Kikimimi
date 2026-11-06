@@ -10,7 +10,7 @@ export type Session = { status: "loading" | "anon" | "user"; user: User | null }
 
 export const session = createStore<Session>({ status: "loading", user: null });
 
-const RETURN_TO = "gijiroku.returnTo";
+const RETURN_TO = "kikimimi.returnTo";
 
 export function currentUser(): User | null {
   return session.get().user;
@@ -35,7 +35,7 @@ onUnauthenticated(() => {
   // 起動時の確認（未ログイン）は「切れた」ではないので、知らせない。
   if (session.get().status !== "user") return;
   const here = location.hash || "#/";
-  if (here !== "#/login" && here !== "#/register") sessionSet(RETURN_TO, here);
+  if (here !== "#/login" && here !== "#/register" && here !== "#/reset") sessionSet(RETURN_TO, here);
   setCsrf("");
   session.set({ status: "anon", user: null });
   notify("ログインの有効期限が切れました。もう一度ログインしてください。", "warn", "auth");
@@ -44,7 +44,7 @@ onUnauthenticated(() => {
 
 /** ログイン前に開こうとした画面を覚える。 */
 export function rememberReturn(hash: string) {
-  if (hash && hash !== "#/" && hash !== "#/login" && hash !== "#/register") sessionSet(RETURN_TO, hash);
+  if (hash && hash !== "#/" && hash !== "#/login" && hash !== "#/register" && hash !== "#/reset") sessionSet(RETURN_TO, hash);
 }
 
 export function returnAfterLogin() {
@@ -57,9 +57,25 @@ export async function login(loginId: string, password: string) {
   enter(await api<AuthResponse>("/api/auth/login", { method: "POST", body: { login_id: loginId, password } }));
 }
 
-export async function register(loginId: string, password: string) {
+export async function requestRegisterCode(loginId: string, invite: string) {
+  await api<{ sent: boolean }>("/api/auth/register/code", { method: "POST", body: { login_id: loginId, invite } });
+}
+
+export async function verifyRegisterCode(loginId: string, code: string) {
+  await api<{ ok: boolean }>("/api/auth/register/verify", { method: "POST", body: { login_id: loginId, code } });
+}
+
+export async function register(loginId: string, password: string, code: string, invite: string) {
   // プランは送らない。登録時はサーバが必ず Free を割り当てる。
-  enter(await api<AuthResponse>("/api/auth/register", { method: "POST", body: { login_id: loginId, password } }));
+  enter(await api<AuthResponse>("/api/auth/register", { method: "POST", body: { login_id: loginId, password, code, invite } }));
+}
+
+export async function requestPasswordReset(loginId: string) {
+  await api<{ sent: boolean }>("/api/auth/password/forgot", { method: "POST", body: { login_id: loginId } });
+}
+
+export async function resetPassword(loginId: string, code: string, password: string) {
+  enter(await api<AuthResponse>("/api/auth/password/reset", { method: "POST", body: { login_id: loginId, code, password } }));
 }
 
 export async function changePassword(current: string, next: string) {

@@ -25,7 +25,7 @@ pub fn open(url: &str) {
 
 fn find_chrome() -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    if let Ok(path) = std::env::var("GIJIROKU_CHROME") {
+    if let Ok(path) = std::env::var("KIKIMIMI_CHROME") {
         candidates.push(PathBuf::from(path));
     }
     if let Ok(local) = std::env::var("LOCALAPPDATA") {

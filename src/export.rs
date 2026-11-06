@@ -127,7 +127,7 @@ pub fn file_name(minutes: &Minutes) -> String {
         .as_deref()
         .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
         .map(|time| time.with_timezone(&chrono::Local).format("%Y%m%d").to_string())
-        .unwrap_or_else(|| "gijiroku".into());
+        .unwrap_or_else(|| "kikimimi".into());
     let title = safe_file_stem(&minutes.title);
     let title = title.trim();
     if title.is_empty() {
@@ -270,10 +270,25 @@ pub fn render_scope(minutes: &Minutes, scope: Scope) -> String {
 
 /// 自動要約ができなかったときの下書き。記録にある事実だけを並べ、推測で埋めない。
 pub fn fallback_summary(minutes: &Minutes, error: &str) -> String {
+    draft_from_record(
+        minutes,
+        &format!("自動要約に失敗したため、記録から下書きを組み立てました。{error}"),
+        "自動要約に失敗したため未抽出です。書き起こしから確認してください",
+    )
+}
+
+/// API を使わず、残っている書き起こしから議事録を組み立てる。
+pub fn plain_minutes(minutes: &Minutes) -> String {
+    draft_from_record(
+        minutes,
+        "APIキーは使っていません。残っている書き起こしから議事録を組み立てました。",
+        "APIを使っていないため、宿題は書き起こしから拾っていません",
+    )
+}
+
+fn draft_from_record(minutes: &Minutes, lead: &str, actions: &str) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "> 自動要約に失敗したため、記録から下書きを組み立てました。{error}\n\n"
-    ));
+    out.push_str(&format!("> {lead}\n\n"));
     out.push_str("## 会議の概要\n\n");
     out.push_str(&format!("- 会議: {}\n", minutes.title));
     if let Some(started) = minutes.started_at.as_deref() {
@@ -339,7 +354,7 @@ pub fn fallback_summary(minutes: &Minutes, error: &str) -> String {
         }
     }
     out.push_str("\n## アクションアイテム\n\n");
-    out.push_str("- 自動要約に失敗したため未抽出です。書き起こしから確認してください\n");
+    out.push_str(&format!("- {actions}\n"));
     out
 }
 

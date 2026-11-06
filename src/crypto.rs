@@ -80,6 +80,7 @@ fn cipher() -> &'static XChaCha20Poly1305 {
 }
 
 /// 会員の秘密値の結び付け先。会員IDと項目名（"api_key" など）。
+/// 接頭辞 `gijiroku/` は保存済み暗号文の付加データなので、アプリ名を変えても維持する。
 pub fn user_context(user_id: i64, field: &str) -> String {
     format!("gijiroku/user/{user_id}/{field}")
 }

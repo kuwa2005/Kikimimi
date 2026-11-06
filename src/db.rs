@@ -9,7 +9,7 @@ pub const DEFAULT_MODEL: &str = "gemini-3.8-flash";
 /// 一時エラーで同じ区間を Gemini に送る回数の上限。打ち切りと再開で同じ値を使う。
 pub const MAX_ATTEMPTS: i64 = 5;
 
-const LATEST_VERSION: i64 = 10;
+const LATEST_VERSION: i64 = 13;
 
 /// 版 7 より前の既定の要約プロンプト。変えていない会員は、移行で新しい既定に置き換える。
 const OLD_SUMMARY_PROMPT_V6: &str = "\
@@ -150,6 +150,9 @@ fn migrate(conn: &Connection) -> Result<()> {
             8 => migrate_v8(&tx)?,
             9 => migrate_v9(&tx)?,
             10 => migrate_v10(&tx)?,
+            11 => migrate_v11(&tx)?,
+            12 => migrate_v12(&tx)?,
+            13 => migrate_v13(&tx)?,
             _ => anyhow::bail!("不明なスキーマ版 {next}"),
         }
         tx.execute("UPDATE schema_version SET version=?1", [next])?;
@@ -235,7 +238,7 @@ fn migrate_v3(conn: &Connection) -> Result<()> {
 }
 
 /// 版 4: 会員制。会員・セッション・プラン・利用量・会員ごとの設定と、データの持ち主の列。
-/// 既存の会議などの持ち主は空（NULL）のままにし、運用者が `gijiroku admin assign-legacy` で明示的に移す。
+/// 既存の会議などの持ち主は空（NULL）のままにし、運用者が `kikimimi admin assign-legacy` で明示的に移す。
 fn migrate_v4(conn: &Connection) -> Result<()> {
     conn.execute_batch(V4_TABLES)?;
     add_column(conn, "meetings", "user_id", "INTEGER REFERENCES users(id) ON DELETE CASCADE")?;
@@ -502,6 +505,45 @@ fn migrate_v10(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// 版 11: 会議ごとの文字起こし（api / chrome / off）と、終了時に API を使うかどうか。
+fn migrate_v11(conn: &Connection) -> Result<()> {
+    add_column(conn, "meetings", "speech", "TEXT NOT NULL DEFAULT 'api'")?;
+    add_column(conn, "meetings", "transcript_only", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column(conn, "meetings", "finish_close", "TEXT NOT NULL DEFAULT ''")?;
+    Ok(())
+}
+
+/// 版 12: 登録前のメール確認コード。平文のコードは置かず、ソルト付きのハッシュだけを残す。
+fn migrate_v12(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS signup_codes (
+           email TEXT PRIMARY KEY,
+           salt TEXT NOT NULL,
+           code_hash TEXT NOT NULL,
+           password_hash TEXT NOT NULL,
+           expires_at TEXT NOT NULL,
+           attempts INTEGER NOT NULL DEFAULT 0,
+           created_at TEXT NOT NULL
+         );",
+    )?;
+    Ok(())
+}
+
+/// 版 13: パスワード再設定の確認コード。登録用のコードとは別にして、取り違えない。
+fn migrate_v13(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS reset_codes (
+           email TEXT PRIMARY KEY,
+           salt TEXT NOT NULL,
+           code_hash TEXT NOT NULL,
+           expires_at TEXT NOT NULL,
+           attempts INTEGER NOT NULL DEFAULT 0,
+           created_at TEXT NOT NULL
+         );",
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MeetingDoc {
     pub id: i64,
@@ -755,7 +797,10 @@ fn create_fresh(conn: &Connection) -> Result<()> {
     migrate_v7(conn)?;
     migrate_v8(conn)?;
     migrate_v9(conn)?;
-    migrate_v10(conn)
+    migrate_v10(conn)?;
+    migrate_v11(conn)?;
+    migrate_v12(conn)?;
+    migrate_v13(conn)
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -800,6 +845,24 @@ impl Settings {
         }
     }
 
+    /// 録音を文字にするキーがあるか。Claude のときは文字起こし用の提供元を見る。
+    pub fn has_transcribe_key(&self) -> bool {
+        match self.transcribe_provider() {
+            "openai" => !self.openai_api_key.is_empty(),
+            _ => !self.api_key.is_empty(),
+        }
+    }
+
+    /// 書き起こしを議事録にまとめるキーがあるか。
+    pub fn has_chat_key(&self) -> bool {
+        if self.uses_anthropic() {
+            !self.anthropic_api_key.is_empty()
+        } else if self.uses_openai() {
+            !self.openai_api_key.is_empty()
+        } else {
+            !self.api_key.is_empty()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -840,6 +903,12 @@ pub struct Meeting {
     pub retry_waiting: i64,
     pub next_retry_at: Option<String>,
     pub failed_jobs: i64,
+    /// 録音中の文字起こし。"api"（APIキー）/ "chrome"（Chrome の音声認識）/ "off"（録音だけ）。
+    pub speech: String,
+    /// API の文字起こしを、回答やナレッジを付けずに文字だけにする。
+    pub transcript_only: bool,
+    /// 終了のしかた。"" は従来どおり、"api" / "chrome" / "plain"。
+    pub finish_close: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1542,7 +1611,7 @@ fn like_contains(query: &str) -> String {
 pub fn get_meeting(conn: &Connection, id: i64) -> Result<Option<Meeting>> {
     let row = conn
         .query_row(
-            "SELECT id, title, status, created_at, started_at, ended_at, summary_md, duration_sec, finish_requested, active_question_id, error, participants, summary_at, participants_auto, folder_id, position, next_hint
+            "SELECT id, title, status, created_at, started_at, ended_at, summary_md, duration_sec, finish_requested, active_question_id, error, participants, summary_at, participants_auto, folder_id, position, next_hint, speech, transcript_only, finish_close
              FROM meetings WHERE id=?1",
             [id],
             |row| {
@@ -1568,6 +1637,9 @@ pub fn get_meeting(conn: &Connection, id: i64) -> Result<Option<Meeting>> {
                     retry_waiting: 0,
                     next_retry_at: None,
                     failed_jobs: 0,
+                    speech: row.get(17)?,
+                    transcript_only: row.get::<_, i64>(18)? != 0,
+                    finish_close: row.get(19)?,
                 })
             },
         )
@@ -2223,7 +2295,7 @@ pub fn set_live(conn: &Connection, meeting_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// 上限の確認つきの開始。同時録音数と今月の会議数をトランザクションの中で確かめる。
+/// 上限の確認つきの開始。同時録音数と今日の会議数をトランザクションの中で確かめる。
 pub fn start_meeting_checked(
     conn: &mut Connection,
     user_id: i64,
@@ -2375,6 +2447,72 @@ pub fn set_resumed(conn: &Connection, meeting_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// 録音中の文字起こしのしかたと、文字だけにするかを返す。
+pub fn meeting_ears(conn: &Connection, meeting_id: i64) -> Result<(String, bool)> {
+    conn.query_row(
+        "SELECT speech, transcript_only FROM meetings WHERE id=?1",
+        [meeting_id],
+        |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+    )
+    .optional()?
+    .context("会議がありません")
+}
+
+pub fn finish_close(conn: &Connection, meeting_id: i64) -> Result<String> {
+    conn.query_row("SELECT finish_close FROM meetings WHERE id=?1", [meeting_id], |r| r.get(0))
+        .optional()?
+        .context("会議がありません")
+}
+
+fn normalize_speech(speech: &str) -> Result<&str> {
+    match speech {
+        "api" | "chrome" | "off" => Ok(speech),
+        _ => anyhow::bail!("文字起こしのしかたが正しくありません"),
+    }
+}
+
+/// 録音中に、API・Chrome・録音だけのどれで文字にするかを切り替える。
+/// API に戻したときは、保留していた録音を文字起こし待ちに戻す。
+pub fn set_speech(conn: &Connection, meeting_id: i64, speech: &str, transcript_only: bool) -> Result<()> {
+    let status = meeting_status(conn, meeting_id)?;
+    if status != "draft" && status != "live" && status != "paused" {
+        anyhow::bail!("この会議の文字起こしは切り替えられません");
+    }
+    let speech = normalize_speech(speech)?;
+    conn.execute(
+        "UPDATE meetings SET speech=?1, transcript_only=?2 WHERE id=?3",
+        params![speech, transcript_only as i64, meeting_id],
+    )?;
+    if speech == "api" {
+        promote_held(conn, meeting_id)?;
+    }
+    Ok(())
+}
+
+/// Chrome や録音だけの間に保留した音声を、API の文字起こし待ちにする。
+pub fn promote_held(conn: &Connection, meeting_id: i64) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE audio_jobs SET status='pending' WHERE meeting_id=?1 AND status='held'",
+        [meeting_id],
+    )?)
+}
+
+/// 終了のしかたを記録してから終了を依頼する。`api` のときは保留中の録音も文字起こし待ちにする。
+pub fn prepare_finish(conn: &Connection, meeting_id: i64, close: &str) -> Result<()> {
+    let close = match close {
+        "" | "api" | "chrome" | "plain" => close,
+        _ => anyhow::bail!("終了のしかたが正しくありません"),
+    };
+    if close == "api" {
+        promote_held(conn, meeting_id)?;
+    }
+    conn.execute(
+        "UPDATE meetings SET finish_close=?1 WHERE id=?2",
+        params![close, meeting_id],
+    )?;
+    request_finish(conn, meeting_id)
+}
+
 pub fn request_finish(conn: &Connection, meeting_id: i64) -> Result<()> {
     let status = meeting_status(conn, meeting_id)?;
     if status == "done" || status == "wrapping" {
@@ -2497,11 +2635,11 @@ fn enqueue(
         (chunk.start_ms, chunk.wav_path, chunk.duration_sec, chunk.silent);
     let duration_ms = (duration_sec * 1000.0).round() as i64;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (status, finish): (String, bool) = tx
+    let (status, finish, speech): (String, bool, String) = tx
         .query_row(
-            "SELECT status, finish_requested FROM meetings WHERE id=?1",
+            "SELECT status, finish_requested, speech FROM meetings WHERE id=?1",
             [meeting_id],
-            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get(2)?)),
         )
         .optional()?
         .context("会議がありません")?;
@@ -2535,7 +2673,13 @@ fn enqueue(
             meeting_id,
             start_ms,
             wav_path,
-            if silent { "done" } else { "pending" },
+            if silent {
+                "done"
+            } else if speech == "chrome" || speech == "off" {
+                "held"
+            } else {
+                "pending"
+            },
             now_stamp(),
             silent as i64,
             duration_ms,
@@ -2844,6 +2988,37 @@ pub fn set_auto_speakers(conn: &Connection, meeting_id: i64, speakers: &[(i64, S
     Ok(changed)
 }
 
+/// Chrome の音声認識で確定した一文を、その会議の書き起こしとして残す。
+/// 文字起こしが Chrome の会議で、録音中か一時停止中のときだけ受け付ける。
+pub fn save_caption(conn: &Connection, meeting_id: i64, start_sec: f64, text: &str) -> Result<Option<Segment>> {
+    let (status, speech): (String, String) = conn
+        .query_row(
+            "SELECT status, speech FROM meetings WHERE id=?1",
+            [meeting_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .context("会議がありません")?;
+    if speech != "chrome" {
+        anyhow::bail!("Chrome の音声認識を選んでいる会議だけ、この書き起こしを保存できます");
+    }
+    if status != "live" && status != "paused" {
+        anyhow::bail!("録音中か一時停止中だけ、書き起こしを保存できます");
+    }
+    let text: String = text.trim().chars().take(4_000).collect();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if !start_sec.is_finite() || start_sec < 0.0 || start_sec > 86_400.0 * 12.0 {
+        anyhow::bail!("書き起こしの時刻が正しくありません");
+    }
+    if segment_exists(conn, meeting_id, start_sec)? {
+        return Ok(None);
+    }
+    let id = insert_segment(conn, meeting_id, start_sec, &text)?;
+    Ok(Some(Segment { id, start_sec, text, ..Default::default() }))
+}
+
 pub fn insert_segment(
     conn: &Connection,
     meeting_id: i64,
@@ -3132,6 +3307,26 @@ mod tests {
         // まとめ中には取り込めない。
         conn.execute("UPDATE meetings SET status='wrapping' WHERE id=?1", [id]).unwrap();
         assert!(import_segments(&conn, id, &[(200.0, "x".into())]).is_err());
+    }
+
+    #[test]
+    fn chrome_speech_holds_audio_until_promoted() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        set_speech(&conn, id, "chrome", false).unwrap();
+        let (job, fresh) = enqueue_audio(&mut conn, id, 0, "/tmp/0.wav", 15.0, false).unwrap();
+        assert!(fresh);
+        let status: String = conn.query_row("SELECT status FROM audio_jobs WHERE id=?1", [job], |r| r.get(0)).unwrap();
+        assert_eq!(status, "held");
+        assert_eq!(unfinished_jobs(&conn, id).unwrap(), 0, "保留は終了を待たせない");
+        let saved = save_caption(&conn, id, 1.2, " こんにちは ").unwrap();
+        assert_eq!(saved.unwrap().text, "こんにちは");
+        assert!(save_caption(&conn, id, 1.2, "重複").unwrap().is_none());
+        assert_eq!(promote_held(&conn, id).unwrap(), 1);
+        let status: String = conn.query_row("SELECT status FROM audio_jobs WHERE id=?1", [job], |r| r.get(0)).unwrap();
+        assert_eq!(status, "pending");
+        set_speech(&conn, id, "off", false).unwrap();
+        assert!(save_caption(&conn, id, 3.0, "録るだけ").is_err());
     }
 
     #[test]

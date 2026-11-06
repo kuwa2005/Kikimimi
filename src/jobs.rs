@@ -26,7 +26,7 @@ use crate::state::{AppState, ModelCheck};
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 fn workers() -> usize {
-    std::env::var("GIJIROKU_WORKERS")
+    std::env::var("KIKIMIMI_WORKERS")
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|n: &usize| (1..=8).contains(n))
@@ -314,7 +314,7 @@ async fn process_audio(state: &AppState, job: db::AudioJob) {
         }
     };
     // キーは会議の持ち主のものを、処理の直前に読む。待ち行列にキーの写しは持たない。
-    let (owner, settings, recent, questions) = {
+    let (owner, settings, recent, questions, transcript_only) = {
         let conn = state.db().lock().await;
         let owner = match db::meeting_owner(&conn, job.meeting_id) {
             Ok(Some(Some(owner))) => owner,
@@ -339,9 +339,15 @@ async fn process_audio(state: &AppState, job: db::AudioJob) {
         };
         let recent = db::recent_transcript(&conn, job.meeting_id, job.start_ms).unwrap_or_default();
         let questions = db::list_questions(&conn, job.meeting_id).unwrap_or_default();
-        (owner, settings, recent, questions)
+        let transcript_only = db::meeting_ears(&conn, job.meeting_id).map(|(_, only)| only).unwrap_or(false);
+        (owner, settings, recent, questions, transcript_only)
     };
-    let mut ai = match Ai::from_settings(state, owner, &settings).await {
+    // 文字だけのときは、回答や要約用のキーが無くても文字起こし用のキーで進める。
+    let mut ai = match if transcript_only {
+        Ai::for_transcribe(state, owner, &settings).await
+    } else {
+        Ai::from_settings(state, owner, &settings).await
+    } {
         Ok(ai) => ai,
         Err(err) => {
             fail_job(state, &job, &err).await;
@@ -351,7 +357,15 @@ async fn process_audio(state: &AppState, job: db::AudioJob) {
     let mut quick_retry = false;
     let mut switches = 0;
     let analysis = loop {
-        match ai.analyze(state, &wav, &recent, &questions).await {
+        let heard = if transcript_only {
+            ai.transcribe_wav(state, &wav, &recent).await.map(|text| gemini::ChunkAnalysis {
+                transcript: text,
+                ..Default::default()
+            })
+        } else {
+            ai.analyze(state, &wav, &recent, &questions).await
+        };
+        match heard {
             Ok(parsed) => break parsed,
             Err(err) if gemini::should_switch_model(&err) && switches < 2 => {
                 tracing::warn!(
@@ -670,12 +684,13 @@ async fn summarize(state: &AppState, meeting_id: i64) {
             export::load_minutes(&conn, meeting_id),
             settings.map(|settings| (owner.unwrap_or(0), settings)),
             db::count_error_jobs(&conn, meeting_id).unwrap_or(0),
+            db::finish_close(&conn, meeting_id).unwrap_or_default(),
         )
     };
-    let (mut minutes, (owner, settings), missing) = match loaded {
-        (Ok(Some(minutes)), Ok(settings), missing) => (minutes, settings, missing),
-        (Ok(None), _, _) => return,
-        (Err(err), _, _) | (_, Err(err), _) => {
+    let (mut minutes, (owner, settings), missing, finish_close) = match loaded {
+        (Ok(Some(minutes)), Ok(settings), missing, close) => (minutes, settings, missing, close),
+        (Ok(None), _, _, _) => return,
+        (Err(err), _, _, _) | (_, Err(err), _, _) => {
             // 材料が読めないまま「まとめ中」に残すと、選び直しが止まらない。失敗として完了させる。
             tracing::error!("要約の材料を読めません: {err:#}");
             let message = format!("要約の材料を読めませんでした: {err}");
@@ -687,6 +702,19 @@ async fn summarize(state: &AppState, meeting_id: i64) {
             return;
         }
     };
+
+    if finish_close == "plain" {
+        let summary = note_gaps(export::plain_minutes(&minutes), missing);
+        {
+            let conn = state.db().lock().await;
+            if let Err(err) = db::save_summary(&conn, meeting_id, &summary, None) {
+                tracing::error!("議事録の保存に失敗しました: {err:#}");
+                return;
+            }
+        }
+        publish_done(state, meeting_id).await;
+        return;
+    }
 
     fill_participants(state, meeting_id, owner, &settings, &mut minutes).await;
     infer_speakers(state, meeting_id, owner, &settings, &mut minutes).await;
@@ -1090,6 +1118,20 @@ impl Ai {
                 Ok(Ai::Gemini { model: heard, .. }) => format!("{heard} / {model}"),
                 Ok(Ai::OpenAi { transcribe, .. }) => format!("{transcribe} / {model}"),
                 _ => model.clone(),
+            },
+        }
+    }
+
+    /// 音声を文字にするだけ。回答やナレッジは付けない。
+    async fn transcribe_wav(&self, state: &AppState, wav: &[u8], recent: &str) -> Result<String, String> {
+        match self {
+            Ai::Gemini { key, model } => gemini::transcribe(state.http(), key, model, wav, recent).await,
+            Ai::OpenAi { key, transcribe, .. } => openai::transcribe(state.http(), key, transcribe, wav, recent).await,
+            Ai::Claude { ears, .. } => match ears.as_deref() {
+                Ok(Ai::Gemini { key, model }) => gemini::transcribe(state.http(), key, model, wav, recent).await,
+                Ok(Ai::OpenAi { key, transcribe, .. }) => openai::transcribe(state.http(), key, transcribe, wav, recent).await,
+                Ok(Ai::Claude { .. }) => Err("文字起こしの提供元が正しくありません".into()),
+                Err(err) => Err(err.clone()),
             },
         }
     }
@@ -1505,10 +1547,10 @@ mod tests {
     #[tokio::test]
     async fn each_meeting_uses_its_owners_key() {
         let (base, seen) = mock_ai().await;
-        std::env::set_var("GIJIROKU_GEMINI_BASE", format!("{base}/v1beta"));
-        std::env::set_var("GIJIROKU_OPENAI_BASE", format!("{base}/v1"));
-        std::env::set_var("GIJIROKU_ANTHROPIC_BASE", format!("{base}/anthropic/v1"));
-        let dir = std::env::temp_dir().join(format!("gijiroku-byok-{}", uuid::Uuid::new_v4().simple()));
+        std::env::set_var("KIKIMIMI_GEMINI_BASE", format!("{base}/v1beta"));
+        std::env::set_var("KIKIMIMI_OPENAI_BASE", format!("{base}/v1"));
+        std::env::set_var("KIKIMIMI_ANTHROPIC_BASE", format!("{base}/anthropic/v1"));
+        let dir = std::env::temp_dir().join(format!("kikimimi-byok-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         let state = AppState::new(db::open(&dir.join("t.sqlite")).unwrap(), dir);
         let (alice, bob, carol) = {

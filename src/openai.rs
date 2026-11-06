@@ -11,9 +11,9 @@ use serde_json::{json, Value};
 use crate::db::Question;
 use crate::gemini::{parse_chunk_json, ChunkAnalysis, KeyCheck};
 
-/// API の接続先。テストでは模擬サーバに向ける（`GIJIROKU_OPENAI_BASE`）。
+/// API の接続先。テストでは模擬サーバに向ける（`KIKIMIMI_OPENAI_BASE`）。
 fn base() -> String {
-    std::env::var("GIJIROKU_OPENAI_BASE").unwrap_or_else(|_| "https://api.openai.com/v1".into())
+    std::env::var("KIKIMIMI_OPENAI_BASE").unwrap_or_else(|_| "https://api.openai.com/v1".into())
 }
 
 fn api_error(status: u16, payload: &Value) -> String {

@@ -61,7 +61,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
 body {
   background: var(--bg);
   color: var(--ink);
@@ -70,7 +70,7 @@ body {
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
-#root { min-height: 100%; }
+#root { height: 100%; min-height: 0; overflow: auto; }
 
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 h1, h2, h3 { font-family: "Yu Mincho", "Hiragino Mincho ProN", serif; font-weight: 600; margin: 0; line-height: 1.35; }
@@ -91,7 +91,7 @@ code { font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.85em; }
 /* ---- 入力部品（#66）: すべて同じ寸法・文字・枠・フォーカス ---- */
 button, input, textarea, select { font: inherit; color: inherit; }
 label, legend { display: block; font-size: 0.875rem; font-weight: 600; margin: 0 0 6px; }
-input[type="text"], input[type="password"], input[type="search"], input[type="file"], textarea, select {
+input[type="text"], input[type="email"], input[type="password"], input[type="search"], input[type="file"], textarea, select {
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--line-strong);
@@ -105,6 +105,7 @@ select { appearance: auto; }
 textarea { min-height: 96px; resize: vertical; }
 input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid var(--focus); outline-offset: 0; border-color: var(--focus); }
 input.compact { min-height: 34px; padding: 4px 10px; font-size: 0.875rem; }
+input.code-input { max-width: 220px; letter-spacing: 0.35em; text-align: center; font-variant-numeric: tabular-nums; }
 fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .field { margin: 0 0 16px; }
 .hint { font-size: 0.82rem; color: var(--muted); margin: 6px 0 0; }
@@ -155,7 +156,10 @@ label.check input { width: auto; min-height: 0; margin-top: 5px; }
 .app {
   display: grid;
   grid-template-columns: 224px minmax(0, 1fr);
-  min-height: 100vh;
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 .side {
   background: var(--side);
@@ -166,7 +170,9 @@ label.check input { width: auto; min-height: 0; margin-top: 5px; }
   gap: 14px;
   position: sticky;
   top: 0;
-  height: 100vh;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
 }
 .brand { display: block; color: inherit; text-decoration: none; border-radius: 6px; font-family: "Yu Mincho", "Hiragino Mincho ProN", serif; font-size: 1.4rem; letter-spacing: 0.04em; }
 .brand:hover { text-decoration: underline; text-underline-offset: 4px; cursor: pointer; }
@@ -200,8 +206,16 @@ label.check input { width: auto; min-height: 0; margin-top: 5px; }
 .theme-pick select { min-height: 32px; padding: 2px 8px; font-size: 0.8rem; background: rgba(255,255,255,0.08); color: var(--side-ink); border-color: rgba(255,255,255,0.2); }
 .theme-pick select option { color: #1c1914; }
 
-.main { min-width: 0; padding: 24px 28px 40px; }
-.page { min-width: 0; max-width: 1600px; }
+.main {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 24px 28px 40px;
+  background: var(--bg);
+}
+.page { min-width: 0; min-height: 0; max-width: 1600px; }
 .page-head {
   display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end;
   gap: 12px 16px; margin-bottom: 16px;
@@ -277,7 +291,7 @@ label.check input { width: auto; min-height: 0; margin-top: 5px; }
 .meter span { display: block; height: 100%; width: 0; background: var(--danger); transition: width 0.1s linear; }
 
 /* ---- 会議中（#63）: 見出しの下を残りの高さで分ける ---- */
-.live-page { display: flex; flex-direction: column; height: calc(100vh - 64px); min-height: 520px; }
+.live-page { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .meeting-head {
   display: flex; flex-wrap: wrap; gap: 10px 16px; justify-content: space-between; align-items: flex-start; margin-bottom: 12px;
 }
@@ -287,6 +301,14 @@ label.check input { width: auto; min-height: 0; margin-top: 5px; }
 .meter-line { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 6px; }
 .clock { font-family: "Cascadia Mono", Consolas, monospace; }
 .lag { margin: 4px 0 0; }
+.speech-live {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  align-items: center;
+  margin: 8px 0 0;
+}
+.speech-live legend { font-size: 0.82rem; color: var(--muted); }
 .head-actions { margin-top: 0; justify-content: flex-end; flex: 0 1 auto; }
 .next-q { margin-bottom: 10px; }
 .live-grid {
@@ -304,7 +326,7 @@ label.check input { width: auto; min-height: 0; margin-top: 5px; }
 .pane-head input[type="search"] { width: auto; flex: 0 1 220px; }
 .pane .body, .pane .transcript { overflow: auto; padding: 10px 14px 16px; min-height: 0; flex: 1; }
 .pane-tools { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 8px; }
-.pane.narrow { flex: 1; min-height: 60vh; }
+.pane.narrow { flex: 1; min-height: 0; }
 .narrow-body { display: flex; flex-direction: column; min-height: 0; flex: 1; padding: 10px 14px; }
 .narrow-body .transcript { padding: 0; }
 .search-row { display: flex; gap: 6px; padding: 0 0 6px; }
@@ -312,6 +334,7 @@ label.check input { width: auto; min-height: 0; margin-top: 5px; }
 .pin-filter { margin: 0 0 6px; }
 
 .seg { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: baseline; margin: 0 0 8px; padding: 2px 4px; border-radius: 8px; }
+.seg-text { min-width: 0; overflow-wrap: anywhere; }
 .seg time, .seg .ts { font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.75rem; color: var(--muted); }
 .seg .ts { border: 0; background: transparent; padding: 0; text-decoration: underline dotted; cursor: pointer; }
 .seg .ts:hover { color: var(--accent); }
@@ -393,6 +416,13 @@ pre.preview {
 
 /* ---- ログイン・登録 ---- */
 .auth { max-width: 480px; margin: 8vh auto; padding: 0 16px; }
+.terms {
+  max-height: 240px; overflow: auto; margin: 0 0 16px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2);
+}
+.terms h2 { font-size: 1rem; margin: 0 0 8px; }
+.terms p, .terms li { font-size: 0.9rem; }
+.terms ul { margin: 0; padding-left: 1.2em; }
 .auth-brand { color: var(--ink); margin-bottom: 16px; }
 .auth-brand small { color: var(--muted); }
 .auth h1 { margin-bottom: 12px; }
@@ -416,30 +446,41 @@ dialog.command-menu {
 .hint-line { margin: 8px 4px 0; }
 
 /* ---- 幅に応じた切り替え（#63） ---- */
-/* 長いページでも、サイドの列の背景を下まで敷く（サイド自体は画面に付いてくる）。 */
-@media (min-width: 721px) {
+/* サイドが列のときだけ、その列の背景を下まで敷く。上に畳んだあとに残すと、本文の左が暗い帯になる。 */
+@media (min-width: 1101px) {
   .app { background: linear-gradient(to right, var(--side) 224px, transparent 224px); }
 }
 
 @media (max-width: 1100px) {
-  .app { grid-template-columns: minmax(0, 1fr); }
-  .side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 10px 14px; gap: 10px; }
+  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); background: var(--bg); }
+  .side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 10px 14px; gap: 8px 10px; }
+  .brand { order: 1; }
   .brand small { display: none; }
-  .nav { flex-direction: row; flex-wrap: wrap; }
+  .find { order: 2; min-width: 0; }
+  .side-foot { order: 3; margin-top: 0; margin-left: auto; flex-direction: row; flex-wrap: wrap; align-items: center; }
+  .nav { order: 4; flex: 1 1 100%; flex-direction: row; flex-wrap: wrap; }
   .nav a { padding: 6px 10px; }
   .nav a[aria-current="page"] { box-shadow: inset 0 -3px 0 #6fd6b9; }
-  .side-foot { margin-top: 0; margin-left: auto; flex-direction: row; flex-wrap: wrap; align-items: center; }
-  .live-page { height: calc(100vh - 140px); }
+  .rec-pill { order: 5; }
   .main { padding: 18px 16px 32px; }
 }
+/* 狭い画面の会議中は、見出しの下で書き起こし欄を高さ 0 に潰さない。本文は .main がスクロールする。 */
+@media (max-width: 959px) {
+  .live-page { flex: none; }
+  .pane.narrow { flex: none; min-height: 62vh; }
+  .narrow-body .transcript { flex: 1 1 auto; min-height: 46vh; }
+}
+
 @media (max-width: 720px) {
   .row-link { grid-template-columns: minmax(0, 1fr) auto; }
   .row-link > :nth-child(3), .row-link > :nth-child(4) { display: none; }
-  .live-page { height: auto; }
   .head-actions { justify-content: flex-start; }
+  .actions .btn { white-space: normal; max-width: 100%; }
   .q-row { grid-template-columns: minmax(0, 1fr) auto; }
   .q-label { grid-column: 1 / -1; }
   h1 { font-size: 1.45rem; }
+  .main { padding: 14px 12px 28px; }
+  .side-foot { margin-left: 0; flex-basis: 100%; }
 }
 
 /* 動きを減らす設定では、装飾の点滅を止める（録音中は文言でも示している）。 */
@@ -496,7 +537,7 @@ dialog.command-menu {
 }
 .grip:focus-visible { outline: 2px solid var(--accent); }
 .row.drop-before { box-shadow: 0 -3px 0 var(--accent); }
-.row-folder { max-width: 9rem; font-size: 0.8rem; }
+.row-folder { width: auto; max-width: 9rem; min-width: 0; flex: 0 1 9rem; font-size: 0.8rem; }
 @media (max-width: 640px) { .row-folder { display: none; } }
 
 /* ---- 顧客資料（#97） ---- */
@@ -517,7 +558,13 @@ dialog.command-menu {
 .agenda-time { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
 .badge.now { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .q-row.agenda-row { grid-template-columns: 4.5em minmax(0, 1fr) 5.5rem auto; }
-.minutes-input { width: 5.5rem; }
+.minutes-input { width: 5.5rem; min-width: 0; }
+/* 議題の行は、上の狭い幅の指定より後に書いてある。狭い画面ではラベルを一段上げ、本文が 4.5em に押し込まれないようにする。 */
+@media (max-width: 720px) {
+  .q-row.agenda-row { grid-template-columns: minmax(0, 1fr) minmax(4.5rem, 5.5rem) auto; }
+  .q-row.agenda-row .q-label { grid-column: 1 / -1; }
+  .minutes-input { width: 100%; }
+}
 
 /* ---- 速報字幕（#104） ---- */
 .captions { border-top: 1px dashed var(--line); margin-top: 6px; padding-top: 4px; }

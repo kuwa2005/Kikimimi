@@ -86,6 +86,12 @@ export type Meeting = {
   retry_waiting: number;
   next_retry_at: string | null;
   failed_jobs: number;
+  /** 録音中の文字起こし。"api" / "chrome" / "off"。 */
+  speech?: "api" | "chrome" | "off";
+  /** API の文字起こしを、文字だけにする。 */
+  transcript_only?: boolean;
+  /** 終了のしかた。"" / "api" / "chrome" / "plain"。 */
+  finish_close?: "" | "api" | "chrome" | "plain";
 };
 
 export type Evidence = { segment_id: number; start_sec: number; quote: string };

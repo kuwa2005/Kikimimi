@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorMessage, request } from "../api/client";
-import type { Evidence, ExportScope, MeetingDetail, Segment, Settings } from "../api/types";
+import type { Evidence, ExportScope, MeetingDetail, Segment } from "../api/types";
 import { fmt } from "../lib/format";
 import { useMediaQuery } from "../lib/media";
 import { pref, PREF_PANEL, savePref } from "../lib/prefs";
@@ -20,14 +20,14 @@ import { KnowledgePanel } from "../components/Knowledge";
 import { TabPanel, Tabs } from "../components/Tabs";
 import { AssistBar, markedIds, NotesPanel, TopicHits } from "../components/Assist";
 import { ImportDialog } from "../components/Import";
-import { configureCaptions, setCaptionPhrases } from "../lib/captions";
+import { chromeCaptionMode, configureCaptions, setCaptionPersist, setCaptionPhrases } from "../lib/captions";
 import { sessionGet, sessionRemove } from "../lib/prefs";
 
 /** 新しい会議の画面から「ファイルから取り込む」で来たら、取り込みの画面を開く。 */
 function useImportDialog(meetingId: number) {
-  const [open, setOpen] = useState(() => sessionGet<number>("gijiroku.openImport") === meetingId);
+  const [open, setOpen] = useState(() => sessionGet<number>("kikimimi.openImport") === meetingId);
   useEffect(() => {
-    if (open) sessionRemove("gijiroku.openImport");
+    if (open) sessionRemove("kikimimi.openImport");
   }, [open]);
   return [open, setOpen] as const;
 }
@@ -117,18 +117,40 @@ function LiveView({ detail }: { detail: MeetingDetail }) {
   useEffect(() => {
     setCaptionPhrases(agendaWords.split(/[\n、,，\s]+/).filter((word) => word.length >= 2 && word.length <= 20));
   }, [agendaWords]);
+  const speech = detail.meeting.speech || "api";
   useEffect(() => {
+    if (speech === "off") {
+      setCaptionPersist(null);
+      configureCaptions("off");
+      return () => {
+        setCaptionPersist(null);
+        configureCaptions("off");
+      };
+    }
+    // api: Chrome の速報 ＋ API の文字起こし。chrome: Chrome の音声認識だけを保存する。
     let alive = true;
-    api<Settings>("/api/settings")
-      .then((settings) => {
-        if (alive) configureCaptions(settings.realtime_allowed ? settings.realtime_captions : "off");
-      })
-      .catch(() => {});
+    setCaptionPersist(
+      speech === "chrome"
+        ? (line) => {
+            void api(`/api/meetings/${meetingId}/captions`, { method: "POST", body: { start_sec: line.chunkStart, text: line.text } }).catch((err) =>
+              notify(errorMessage(err), "error", "caption"),
+            );
+          }
+        : null,
+    );
+    void chromeCaptionMode().then((captionMode) => {
+      if (!alive) return;
+      configureCaptions(captionMode);
+      if (captionMode === "off") {
+        notify("このブラウザは Chrome の音声認識に対応していません。デスクトップの Chrome で開いてください。", "warn", "caption");
+      }
+    });
     return () => {
       alive = false;
+      setCaptionPersist(null);
       configureCaptions("off");
     };
-  }, [meetingId]);
+  }, [meetingId, speech]);
   useLimitWarning(detail);
   const marked = markedIds(detail);
   const notes = detail.notes || [];
