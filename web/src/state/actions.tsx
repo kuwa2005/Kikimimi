@@ -1,4 +1,4 @@
-import { api, ApiError, limitText, request } from "../api/client";
+import { api, ApiError, isNetworkError, limitText, request } from "../api/client";
 import type { Meeting, MeetingDetail, Settings } from "../api/types";
 import { fmt, fmtLocal, nowTitle, statusLabel } from "../lib/format";
 import { clearSessionData } from "../lib/prefs";
@@ -7,7 +7,8 @@ import { openDialog } from "./dialog";
 import { clearAllNotices, notify } from "./notices";
 import { clearForm, formKey, setSetupReturn, type MeetingForm } from "./draft";
 import { closeMeeting, currentDetail, setDetail } from "./meeting";
-import { currentUser, leaveSession } from "./session";
+import { currentUser, isOffline, leaveSession } from "./session";
+import { beginOfflineMeeting } from "./offline";
 import {
   drainQueue,
   dropQueue,
@@ -117,7 +118,15 @@ export async function beginMeeting(form: MeetingForm, existingId: number | null)
   }
   const user = currentUser();
   if (!user) throw new Error("ログインしてください");
-  const settings = await api<Settings>("/api/settings");
+  // 回線が無い（サーバに届かない）ときは、端末だけで会議を始める。つながったら自動で引き継ぐ。
+  if (isOffline() || !navigator.onLine) return beginOfflineMeeting(form);
+  let settings: Settings;
+  try {
+    settings = await api<Settings>("/api/settings");
+  } catch (err) {
+    if (isNetworkError(err)) return beginOfflineMeeting(form);
+    throw err;
+  }
   if (form.speech === "api" && !transcribeReady(settings)) {
     setSetupReturn(existingId == null ? "#/new" : `#/m/${existingId}`);
     notify(`先に ${missingKeyName(settings)} の APIキーを登録してください。登録すると、入力した会議の準備に戻れます。Chrome の音声認識なら、キーがなくても始められます。`, "warn", "setup");
@@ -135,6 +144,8 @@ export async function beginMeeting(form: MeetingForm, existingId: number | null)
       body: { speech: form.speech, transcript_only: form.speech === "api" && form.transcriptOnly },
     });
   } catch (err) {
+    // 回線が切れていたら、端末だけで会議を始める（録音の機会を逃さない）。
+    if (isNetworkError(err)) return beginOfflineMeeting(form);
     // 開始できなかったのにマイクを掴み続けない。
     if (!recorderState.get().capturing) stopStream();
     throw err;

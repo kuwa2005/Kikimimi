@@ -2,27 +2,65 @@ import { memo, useEffect, useLayoutEffect, useRef } from "react";
 import type { Segment } from "../api/types";
 import { fmt } from "../lib/format";
 import { captions } from "../lib/captions";
-import { useStore } from "../lib/store";
+import { createStore, useStore } from "../lib/store";
+import { pref, PREF_NEWEST_FIRST, savePref } from "../lib/prefs";
+
+/** 新しい発言を上に出すか（会議中に切り替えられる。端末ごとに覚える）。 */
+export const newestFirst = createStore<boolean>(pref(PREF_NEWEST_FIRST) === "1");
+
+export function setNewestFirst(value: boolean) {
+  savePref(PREF_NEWEST_FIRST, value ? "1" : "0");
+  newestFirst.set(value);
+}
+
+/** 並び順の切り替え。会議中の書き起こしの上に出す。 */
+export function OrderToggle() {
+  const top = useStore(newestFirst);
+  return (
+    <div className="transcript-tools">
+      <button
+        className="btn small ghost"
+        type="button"
+        aria-pressed={top}
+        onClick={() => setNewestFirst(!top)}
+        title="書き起こしと速報字幕の並び順を切り替えます"
+      >
+        {top ? "↑ 新しい発言が上（切り替え）" : "↓ 新しい発言が下（切り替え）"}
+      </button>
+    </div>
+  );
+}
 
 /** 速報字幕（#104）。AI の書き起こしがまだ届いていない部分だけを、末尾に薄く出す。保存はしない。 */
-function LiveCaptions({ after }: { after: number }) {
+export function LiveCaptions({ after, reverse = false }: { after: number; reverse?: boolean }) {
   const state = useStore(captions);
   const lines = state.lines.filter((line) => line.chunkStart > after + 0.05);
   if (!state.running && !lines.length && !state.problem) return null;
+  const rows = lines.map((line) => (
+    <p key={line.chunkStart} className="seg caption">
+      <span className="badge">速報</span>
+      <span className="seg-text">{line.text}</span>
+    </p>
+  ));
+  const interim = state.interim ? (
+    <p key="interim" className="seg caption interim">
+      <span className="badge">速報</span>
+      <span className="seg-text">{state.interim}</span>
+    </p>
+  ) : null;
   return (
     <div className="captions" aria-live="polite" aria-label="速報字幕">
-      {lines.map((line, index) => (
-        <p key={index} className="seg caption">
-          <span className="badge">速報</span>
-          <span className="seg-text">{line.text}</span>
-        </p>
-      ))}
-      {state.interim ? (
-        <p className="seg caption interim">
-          <span className="badge">速報</span>
-          <span className="seg-text">{state.interim}</span>
-        </p>
-      ) : null}
+      {reverse ? (
+        <>
+          {interim}
+          {rows.reverse()}
+        </>
+      ) : (
+        <>
+          {rows}
+          {interim}
+        </>
+      )}
       {state.problem ? <p className="muted small">{state.problem}</p> : null}
     </div>
   );
@@ -121,13 +159,17 @@ export const Transcript = memo(function Transcript({
   const captionState = useStore(captions);
   const captionCount = live ? captionState.lines.length + (captionState.interim ? 1 : 0) : 0;
   const nearBottom = useRef(true);
+  const nearTop = useRef(true);
+  const reverse = useStore(newestFirst) && live;
 
-  // 末尾を見ているときだけ最新へ追いかける。文字を選んでいる間は動かさない。
+  // 最新の側を見ているときだけ最新へ追いかける（新しい発言が上なら先頭、下なら末尾）。文字を選んでいる間は動かさない。
   useLayoutEffect(() => {
     const node = box.current;
-    if (!node || !follow || query || !nearBottom.current || selectionInside(node)) return;
-    node.scrollTop = node.scrollHeight;
-  }, [segments.length, follow, query, captionCount]);
+    if (!node || !follow || query || selectionInside(node)) return;
+    if (reverse) {
+      if (nearTop.current) node.scrollTop = 0;
+    } else if (nearBottom.current) node.scrollTop = node.scrollHeight;
+  }, [segments.length, follow, query, captionCount, reverse]);
 
   useEffect(() => {
     if (flashId == null) return;
@@ -148,16 +190,19 @@ export const Transcript = memo(function Transcript({
       onScroll={(event) => {
         const node = event.currentTarget;
         nearBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+        nearTop.current = node.scrollTop < 48;
       }}
       tabIndex={0}
       aria-label="書き起こし"
     >
+      {live ? <OrderToggle /> : null}
+      {reverse && !query ? <LiveCaptions after={segments.length ? segments[segments.length - 1].start_sec : -1} reverse /> : null}
       {!segments.length ? (
         <div className="empty">話し始めると、数秒遅れてここに出ます。</div>
       ) : !shown.length ? (
         <div className="empty">「{query}」を含む発言はありません。</div>
       ) : (
-        shown.map((segment) => (
+        (reverse ? [...shown].reverse() : shown).map((segment) => (
           <SegmentRow
             key={segment.id}
             segment={segment}
@@ -170,7 +215,7 @@ export const Transcript = memo(function Transcript({
           />
         ))
       )}
-      {live && !query ? <LiveCaptions after={segments.length ? segments[segments.length - 1].start_sec : -1} /> : null}
+      {live && !reverse && !query ? <LiveCaptions after={segments.length ? segments[segments.length - 1].start_sec : -1} /> : null}
     </div>
   );
 });

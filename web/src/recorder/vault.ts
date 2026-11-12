@@ -38,8 +38,29 @@ export type VaultCaption = {
   createdAt: number;
 };
 
+/** オフラインで始めた会議。つながったらサーバに会議を作り、localId を serverId に置き換える。 */
+export type VaultMeeting = {
+  localId: number;
+  userId: number;
+  title: string;
+  questions: string[];
+  agendaMinutes: (number | null)[];
+  participants: string;
+  speech: string;
+  transcriptOnly: boolean;
+  createdAt: number;
+  /** サーバに作った会議の番号。作る前は null。 */
+  serverId: number | null;
+  /** サーバで開始まで済んだか。 */
+  started: boolean;
+  /** オフラインのまま終了を選んだときの終了のしかた。送り終えたらサーバで終了する。 */
+  finishClose: string | null;
+  /** 録音の長さ（秒）。一時停止から再開するときの位置に使う。 */
+  seconds: number;
+};
+
 const NAME = "kikimimi-vault";
-const VERSION = 1;
+const VERSION = 2;
 
 let opening: Promise<IDBDatabase> | null = null;
 let broken = false;
@@ -60,6 +81,7 @@ function open(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains("chunks")) db.createObjectStore("chunks", { keyPath: "id", autoIncrement: true });
       if (!db.objectStoreNames.contains("tail")) db.createObjectStore("tail", { keyPath: "key" });
       if (!db.objectStoreNames.contains("captions")) db.createObjectStore("captions", { keyPath: "id", autoIncrement: true });
+      if (!db.objectStoreNames.contains("meetings")) db.createObjectStore("meetings", { keyPath: "localId" });
     };
     req.onsuccess = () => {
       const db = req.result;
@@ -134,6 +156,10 @@ export async function deleteChunk(id: number): Promise<void> {
   });
 }
 
+export async function getChunk(id: number): Promise<VaultChunk | undefined> {
+  return run(["chunks"], "readonly", (tx) => reqValue(tx.objectStore("chunks").get(id)) as Promise<VaultChunk | undefined>);
+}
+
 export async function listChunks(): Promise<VaultChunk[]> {
   return run(["chunks"], "readonly", (tx) => reqValue(tx.objectStore("chunks").getAll()) as Promise<VaultChunk[]>);
 }
@@ -168,6 +194,50 @@ export async function listCaptions(): Promise<VaultCaption[]> {
   return run(["captions"], "readonly", (tx) => reqValue(tx.objectStore("captions").getAll()) as Promise<VaultCaption[]>);
 }
 
+export async function putMeeting(meeting: VaultMeeting): Promise<void> {
+  await run(["meetings"], "readwrite", (tx) => {
+    tx.objectStore("meetings").put(meeting);
+  });
+}
+
+export async function getMeeting(localId: number): Promise<VaultMeeting | undefined> {
+  return run(["meetings"], "readonly", (tx) => reqValue(tx.objectStore("meetings").get(localId)) as Promise<VaultMeeting | undefined>);
+}
+
+export async function listMeetings(): Promise<VaultMeeting[]> {
+  return run(["meetings"], "readonly", (tx) => reqValue(tx.objectStore("meetings").getAll()) as Promise<VaultMeeting[]>);
+}
+
+export async function deleteMeeting(localId: number): Promise<void> {
+  await run(["meetings"], "readwrite", (tx) => {
+    tx.objectStore("meetings").delete(localId);
+  });
+}
+
+/**
+ * オフラインの会議（負の番号）をサーバの会議番号に付け替える。区間・途中保存・字幕をまとめて 1 トランザクションで。
+ * 途中で落ちても、次回は同じ付け替えをやり直せばよい（何度当てても同じ結果）。
+ */
+export async function rebindMeeting(localId: number, serverId: number): Promise<void> {
+  await run(["chunks", "tail", "captions"], "readwrite", async (tx) => {
+    const chunks = tx.objectStore("chunks");
+    for (const row of (await reqValue(chunks.getAll())) as VaultChunk[]) {
+      if (row.meetingId === localId) chunks.put({ ...row, meetingId: serverId });
+    }
+    const caps = tx.objectStore("captions");
+    for (const row of (await reqValue(caps.getAll())) as VaultCaption[]) {
+      if (row.meetingId === localId) caps.put({ ...row, meetingId: serverId });
+    }
+    const tails = tx.objectStore("tail");
+    for (const row of (await reqValue(tails.getAll())) as VaultTail[]) {
+      if (row.meetingId === localId) {
+        tails.delete(row.key);
+        tails.put({ ...row, meetingId: serverId, key: tailKey(row.userId, serverId) });
+      }
+    }
+  });
+}
+
 /** 会議を削除したとき、その会議の保管分を消す。 */
 export async function forgetMeeting(meetingId: number): Promise<void> {
   await run(["chunks", "tail", "captions"], "readwrite", async (tx) => {
@@ -181,11 +251,11 @@ export async function forgetMeeting(meetingId: number): Promise<void> {
 
 /** ログアウトで未送信分の破棄を選んだとき、その利用者の保管分を消す。 */
 export async function forgetUser(userId: number): Promise<void> {
-  await run(["chunks", "tail", "captions"], "readwrite", async (tx) => {
-    for (const name of ["chunks", "tail", "captions"]) {
+  await run(["chunks", "tail", "captions", "meetings"], "readwrite", async (tx) => {
+    for (const name of ["chunks", "tail", "captions", "meetings"]) {
       const store = tx.objectStore(name);
-      const rows = (await reqValue(store.getAll())) as { id?: number; key?: string; userId: number }[];
-      for (const row of rows) if (row.userId === userId) store.delete((row.id ?? row.key) as IDBValidKey);
+      const rows = (await reqValue(store.getAll())) as { id?: number; key?: string; localId?: number; userId: number }[];
+      for (const row of rows) if (row.userId === userId) store.delete((row.id ?? row.key ?? row.localId) as IDBValidKey);
     }
   });
 }

@@ -11,6 +11,7 @@ import { refreshDetail, setDetail } from "../state/meeting";
 import { notify } from "../state/notices";
 import { captions } from "../lib/captions";
 import { Clock, Meter } from "./Meter";
+import { EnhanceToggle } from "./Enhance";
 import type { ReactNode } from "react";
 
 function stage(detail: MeetingDetail, here: boolean) {
@@ -195,6 +196,7 @@ export function MeetingHead({ detail, extra }: { detail: MeetingDetail; extra?: 
             <>
               <Clock meetingId={id} fallback={meeting.duration_sec} />
               <Meter active={here} label="録音中の音量" />
+              {ears ? <EnhanceToggle /> : null}
             </>
           ) : null}
           {meta.length ? <span className="muted">{meta.join(" ・ ")}</span> : null}

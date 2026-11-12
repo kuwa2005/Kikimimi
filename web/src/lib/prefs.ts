@@ -59,3 +59,6 @@ export function clearSessionData() {
     // 何もしない
   }
 }
+
+export const PREF_NEWEST_FIRST = "kikimimi.newestFirst";
+export const PREF_ENHANCE = "kikimimi.enhance";

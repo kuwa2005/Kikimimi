@@ -2,6 +2,7 @@
 import math, random, struct, sys, wave
 
 out = sys.argv[1] if len(sys.argv) > 1 else "speech.wav"
+scale = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0  # 小さい声の試験用
 rate = 16000
 random.seed(1)
 frames = []
@@ -15,4 +16,4 @@ with wave.open(out, "wb") as w:
     w.setnchannels(1)
     w.setsampwidth(2)
     w.setframerate(rate)
-    w.writeframes(b"".join(struct.pack("<h", int(max(-1, min(1, x)) * 32767)) for x in frames))
+    w.writeframes(b"".join(struct.pack("<h", int(max(-1, min(1, x * scale)) * 32767)) for x in frames))

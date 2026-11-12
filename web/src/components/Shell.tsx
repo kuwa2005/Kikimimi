@@ -3,6 +3,7 @@ import type { Route } from "../lib/router";
 import { useStore } from "../lib/store";
 import { recorderState } from "../recorder/recorder";
 import { session } from "../state/session";
+import { localHash } from "../state/offline";
 import { setTheme, theme, THEME_LABELS, type ThemeChoice } from "../state/theme";
 import { logout } from "../state/actions";
 import { notify } from "../state/notices";
@@ -16,7 +17,8 @@ const NAV: { hash: string; label: string; match: Route["name"] }[] = [
 
 export function Shell({ route, children, onCommand }: { route: Route; children: ReactNode; onCommand: () => void }) {
   const rec = useStore(recorderState);
-  const { user } = useStore(session);
+  const { user, offline } = useStore(session);
+  const unsent = rec.queueLength + rec.parked + rec.captionsPending;
   const choice = useStore(theme);
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
   return (
@@ -50,10 +52,16 @@ export function Shell({ route, children, onCommand }: { route: Route; children: 
           ))}
         </nav>
         {rec.capturing && rec.meetingId != null ? (
-          <a className="rec-pill" href={`#/m/${rec.meetingId}`}>
+          <a className="rec-pill" href={rec.meetingId < 0 ? localHash(rec.meetingId) : `#/m/${rec.meetingId}`}>
             <span className="dot" aria-hidden="true" />
             <span>録音中の会議へ戻る</span>
           </a>
+        ) : null}
+        {offline || unsent ? (
+          <p className="muted small" role="status" aria-live="polite">
+            {offline ? <span className="offline-badge">オフライン</span> : null}
+            {unsent ? ` 端末に保存中の未送信 ${unsent} 件（自動で送ります）` : offline ? " 録音はこの端末に保存します" : ""}
+          </p>
         ) : null}
         <div className="side-foot">
           {user ? (

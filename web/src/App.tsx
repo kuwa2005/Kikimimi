@@ -17,6 +17,8 @@ import { Login, Register, ResetPassword } from "./pages/Auth";
 import { Home } from "./pages/Home";
 import { MeetingForm } from "./pages/MeetingForm";
 import { MeetingPage } from "./pages/Meeting";
+import { LocalMeetingPage } from "./pages/LocalMeeting";
+import { localHash } from "./state/offline";
 import { Settings } from "./pages/Settings";
 
 const PUBLIC: Route["name"][] = ["login", "register", "reset"];
@@ -33,7 +35,7 @@ function useCommands(route: Route): Command[] {
       { id: "account", label: "アカウントを開く", keywords: "プラン 利用量 パスワード account", run: () => navigate("#/account") },
     ];
     if (rec.capturing && rec.meetingId != null) {
-      list.unshift({ id: "back", label: "録音中の会議へ戻る", keywords: "録音中 recording", run: () => navigate(`#/m/${rec.meetingId}`) });
+      list.unshift({ id: "back", label: "録音中の会議へ戻る", keywords: "録音中 recording", run: () => navigate(rec.meetingId! < 0 ? localHash(rec.meetingId!) : `#/m/${rec.meetingId}`) });
     }
     const detail = route.name === "meeting" && meetingState.detail?.meeting.id === route.id ? meetingState.detail : null;
     if (detail && detail.meeting.status !== "done" && detail.meeting.status !== "draft" && !detail.meeting.finish_requested) {
@@ -107,6 +109,9 @@ export function App() {
       break;
     case "meeting":
       page = <MeetingPage id={route.id} />;
+      break;
+    case "local":
+      page = <LocalMeetingPage key={route.id} localId={route.id} />;
       break;
     case "settings":
       page = <Settings />;

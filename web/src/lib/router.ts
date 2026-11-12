@@ -5,6 +5,7 @@ export type Route =
   | { name: "home" }
   | { name: "new" }
   | { name: "meeting"; id: number }
+  | { name: "local"; id: number }
   | { name: "settings" }
   | { name: "account" }
   | { name: "login" }
@@ -23,6 +24,9 @@ export function parseHash(hash: string): Route {
   if (value === "#/reset") return { name: "reset" };
   const meeting = value.match(/^#\/m\/(\d+)$/);
   if (meeting) return { name: "meeting", id: Number(meeting[1]) };
+  // オフラインで始めた会議（端末内の番号は負の数。画面の番号は正の数で持つ）。
+  const local = value.match(/^#\/local\/(\d+)$/);
+  if (local) return { name: "local", id: -Number(local[1]) };
   return { name: "unknown" };
 }
 

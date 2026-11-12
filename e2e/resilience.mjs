@@ -23,6 +23,10 @@ fs.mkdirSync(WORK, { recursive: true });
 if (!fs.existsSync(path.join(WORK, "speech.wav"))) {
   execFileSync("python3", [path.join(HERE, "make-speech.py"), path.join(WORK, "speech.wav")]);
 }
+if (!fs.existsSync(path.join(WORK, "quiet.wav"))) {
+  // 声が小さいマイク（音量 1/15）
+  execFileSync("python3", [path.join(HERE, "make-speech.py"), path.join(WORK, "quiet.wav"), "0.066"]);
+}
 const CHROME = chromium.executablePath();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
@@ -55,7 +59,7 @@ const FAKE_SR = `(() => {
   window.webkitSpeechRecognition = FakeSR;
 })();`;
 
-async function launch(profile) {
+async function launch(profile, audio = "speech.wav") {
   port += 1;
   const proc = spawn(
     CHROME,
@@ -67,7 +71,7 @@ async function launch(profile) {
       "--no-first-run",
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
-      `--use-file-for-fake-audio-capture=${path.join(WORK, "speech.wav")}`,
+      `--use-file-for-fake-audio-capture=${path.join(WORK, audio)}`,
       "--autoplay-policy=no-user-gesture-required",
       "about:blank",
     ],
@@ -161,6 +165,16 @@ c=sqlite3.connect("file:${DB}?mode=ro",uri=True)
 print(json.dumps(c.execute("select start_sec,text from segments where meeting_id=? order by start_sec",(${meetingId},)).fetchall()))`,
   ]);
   return JSON.parse(out.toString());
+}
+
+function backups(meetingId) {
+  const out = execFileSync("python3", [
+    "-c",
+    `import sqlite3
+c=sqlite3.connect("file:${DB}?mode=ro",uri=True)
+print(c.execute("select count(*) from caption_backup where meeting_id=?",(${meetingId},)).fetchone()[0])`,
+  ]);
+  return Number(out.toString());
 }
 
 /** 区間が隙間・重なりなく並んでいるか。 */
@@ -435,7 +449,172 @@ async function scenarioApiFailure() {
   crash(b.proc);
 }
 
-const all = { crash: scenarioCrash, offline: scenarioOffline, background: scenarioBackground, errors: scenarioServerErrors, apifail: scenarioApiFailure };
+async function vaultCounts(page) {
+  return page.evaluate(async () => {
+    const db = await new Promise((r) => { const q = indexedDB.open("kikimimi-vault"); q.onsuccess = () => r(q.result); });
+    const count = (name) => new Promise((r) => { const q = db.transaction(name).objectStore(name).count(); q.onsuccess = () => r(q.result); });
+    return { chunks: await count("chunks"), tail: await count("tail"), captions: await count("captions"), meetings: await count("meetings") };
+  });
+}
+
+/** 一度オンラインで開いて、画面のキャッシュ（Service Worker）とログインした利用者を覚えさせる。 */
+async function primeOffline(b) {
+  await login(b.page);
+  await closeLeftovers(b.page);
+  await b.page.evaluate(() => navigator.serviceWorker.ready);
+  await b.page.reload();
+  await b.page.waitForFunction(() => !!navigator.serviceWorker.controller, null, { timeout: 15000 });
+}
+
+async function startOffline(b, title) {
+  await b.context.setOffline(true);
+  await b.page.reload();
+  await b.page.waitForSelector("text=オフライン", { timeout: 15000 });
+  const offlineSession = await b.page.locator(".offline-badge").count();
+  await b.page.goto(`${BASE}/#/new`);
+  await b.page.locator("input").first().fill(title);
+  await b.page.getByRole("button", { name: "会議開始（録音開始）" }).click();
+  await b.page.waitForFunction(() => /^#\/local\/\d+/.test(location.hash), null, { timeout: 15000 });
+  await b.page.waitForFunction(() => window.__recorder && window.__recorder.capturing);
+  return offlineSession > 0;
+}
+
+async function scenarioOfflineStart() {
+  log("■ 完全にオフラインの状態から録音を始め、途中で回線がつながる");
+  const b = await launch(freshProfile("offlinestart"));
+  await primeOffline(b);
+  const badge = await startOffline(b, "オフライン開始試験");
+  check("オフラインでも画面が開き、ログイン中として動く", badge);
+  check("オフラインのまま会議を始めて録音できる", true);
+  await sleep(18000);
+  const before = await localMs(b.page);
+  const counts = await vaultCounts(b.page);
+  check("オフライン中の録音・字幕・会議は端末に保存される", counts.chunks >= 1 && counts.meetings === 1 && counts.captions >= 1, JSON.stringify(counts));
+  // モバイル回線がつながった
+  await b.context.setOffline(false);
+  const moved = await waitFor(async () => {
+    const hash = await b.page.evaluate(() => location.hash);
+    return /^#\/m\/\d+/.test(hash) ? hash : null;
+  }, 30000);
+  check("つながると自動でサーバに会議を作り、会議画面へ移る", !!moved, String(moved));
+  const id = moved ? Number(moved.match(/\d+/)[0]) : 0;
+  const still = await b.page.evaluate(() => window.__recorder.capturing && window.__recorder.meetingId);
+  check("引き継いだあとも録音は止まらず続く", still === id, `meetingId=${still}`);
+  await sleep(8000);
+  await b.page.getByRole("button", { name: "一時停止" }).click();
+  const drained = await waitFor(async () => (await b.page.evaluate(() => window.__recorder.queue.length === 0 && window.__recorder.captionQueue.length === 0)) || null, 30000);
+  const local = await b.page.evaluate(() => window.__recorder.sentSamples / 16);
+  const c = contiguity(jobs(id));
+  check("オフライン中とその後の録音が、隙間なく 1 つの会議に並ぶ", !!drained && c.gaps.length === 0 && Math.abs(c.total - local) < 100 && c.total > before, `server=${c.total}ms 端末=${Math.round(local)}ms gaps=${JSON.stringify(c.gaps)}`);
+  const made = await b.page.evaluate(() => window.__srCount || 0);
+  // API の会議では速報は控え（caption_backup）に、Chrome の会議では書き起こし（segments）に入る。
+  const kept = segments(id).length + backups(id);
+  check("オフライン中の速報字幕もサーバに残る（書き起こしか控え）", kept >= made - 1, `server=${kept} / 作った数=${made}`);
+  const left = await vaultCounts(b.page);
+  check("送り終えたら端末の保管庫が空になる", left.chunks === 0 && left.tail === 0 && left.captions === 0, JSON.stringify(left));
+  await b.browser.close().catch(() => {});
+  crash(b.proc);
+}
+
+async function scenarioOfflineCrash() {
+  log("■ オフラインで録音中にブラウザが落ち、オフラインのまま開き直し、終了してから回線がつながる");
+  const profile = freshProfile("offlinecrash");
+  let b = await launch(profile);
+  await primeOffline(b);
+  await startOffline(b, "オフライン中のクラッシュ試験");
+  await sleep(15000);
+  const before = await localMs(b.page);
+  crash(b.proc);
+  await sleep(1500);
+  b = await launch(profile);
+  await b.context.setOffline(true);
+  await b.page.goto(`${BASE}/#/`);
+  const listed = await waitFor(async () => (await b.page.locator("text=オフライン中のクラッシュ試験").count()) || null, 15000);
+  check("オフラインのまま開き直しても、端末の会議がホームに出る", !!listed);
+  await b.page.locator("text=オフライン中のクラッシュ試験").first().click();
+  await b.page.waitForFunction(() => /^#\/local\//.test(location.hash));
+  await b.page.getByRole("button", { name: "終了" }).click();
+  await b.page.getByRole("button", { name: "終了する" }).click();
+  await sleep(1000);
+  await b.context.setOffline(false);
+  const finished = await waitFor(async () => {
+    // ブラウザが落ちると Cookie が消えることがある。その場合はログインし直す（録音は端末に残っている）。
+    if ((await b.page.evaluate(() => location.hash)) === "#/login" && (await b.page.locator("#login-id").count())) {
+      log("  ログインし直します");
+      await b.page.fill("#login-id", EMAIL);
+      await b.page.fill("#login-password", PASSWORD);
+      await b.page.locator("form button[type=submit]").first().click();
+      await sleep(1000);
+    }
+    const list = await api(b.page, "/api/meetings?limit=50");
+    const m = (list.body?.meetings || []).find((x) => x.title === "オフライン中のクラッシュ試験");
+    return m && (m.status === "done" || m.status === "wrapping") ? m : null;
+  }, 60000, 1000);
+  if (!finished) {
+    log("  画面のお知らせ: " + (await b.page.locator(".notices, [role=status], [role=alert]").allTextContents()).join(" | "));
+    log("  状態: " + JSON.stringify(await b.page.evaluate(() => ({ hash: location.hash, q: window.__recorder.queue.map((i) => i.meetingId), parked: window.__recorder.parked.length, paused: window.__recorder.paused }))));
+    log("  保管庫: " + JSON.stringify(await vaultCounts(b.page)));
+  }
+  check("つながると会議を作り、録音を送り、終了まで進む", !!finished, finished ? finished.status : "");
+  const c = finished ? contiguity(jobs(finished.id)) : { total: 0, gaps: [] };
+  check("落ちる直前までの録音が残る（途中保存の間隔 2 秒以内）", c.total >= before - 2600 && c.gaps.length === 0, `server=${c.total}ms / 落ちる前=${before}ms`);
+  await b.browser.close().catch(() => {});
+  crash(b.proc);
+}
+
+async function scenarioOrder() {
+  log("■ 速報字幕の並び順を、会議中に反転する");
+  const b = await launch(freshProfile("order"));
+  await login(b.page);
+  // API の会議は速報字幕をそのまま並べる（試験用のダミーキーで開始できるようにする）。
+  await api(b.page, "/api/settings", { method: "PUT", body: JSON.stringify({ provider: "gemini", api_key: "AIza-dummy-for-test-only" }) });
+  await startMeeting(b.page, "並び順試験", "api");
+  await sleep(6000);
+  const toggle = b.page.locator(".transcript-tools button").first();
+  const before = await b.page.locator(".captions .seg-text").allTextContents();
+  await toggle.click();
+  await sleep(2000);
+  const after = await b.page.locator(".captions .seg-text").allTextContents();
+  const num = (t) => Number((t.match(/\d+/) || [0])[0]);
+  check("通常は新しい字幕が下", before.length >= 2 && num(before[before.length - 1]) > num(before[0]), JSON.stringify(before));
+  check("切り替えると新しい字幕が上", after.length >= 2 && num(after[0]) > num(after[after.length - 1]), JSON.stringify(after));
+  check("切り替えても録音は止まらない", await b.page.evaluate(() => window.__recorder.capturing));
+  await b.page.reload();
+  await b.page.waitForSelector(".transcript-tools button");
+  const kept = await b.page.locator(".transcript-tools button").first().getAttribute("aria-pressed");
+  check("並び順は端末に記憶される", kept === "true");
+  await b.page.locator(".transcript-tools button").first().click();
+  await b.browser.close().catch(() => {});
+  crash(b.proc);
+}
+
+async function scenarioEnhance() {
+  log("■ 声が小さいマイクで、音声強化を会議中にオンにする");
+  const b = await launch(freshProfile("enhance"), "quiet.wav");
+  await login(b.page);
+  const id = await startMeeting(b.page, "音声強化試験");
+  await b.page.evaluate(() => localStorage.setItem("kikimimi.enhance", "0"));
+  await sleep(4000);
+  const quiet = await b.page.evaluate(() => window.__recorder.speechRms);
+  await b.page.locator(".enhance-toggle input").check();
+  await sleep(20000);
+  const st = await b.page.evaluate(() => ({ gain: window.__recorder.autoGain, rms: window.__recorder.speechRms, ratio: window.__recorder.chain.compressor.ratio.value, hp: window.__recorder.chain.highpass.frequency.value, capturing: window.__recorder.capturing }));
+  log(`  強化前の発話の大きさ ${quiet.toFixed(4)} → 強化後 ${st.rms.toFixed(4)}（音量 ×${st.gain.toFixed(1)}）`);
+  check("録音中にオンにでき、録音は止まらない", st.capturing && st.ratio === 4 && st.hp === 110);
+  check("小さい声を目安の大きさまで持ち上げる", st.rms > 0.07 && st.rms > quiet * 1.8, `rms ${quiet.toFixed(3)}→${st.rms.toFixed(3)} 自動ゲイン×${st.gain.toFixed(2)}`);
+  await b.page.locator(".enhance-toggle input").uncheck();
+  await sleep(500);
+  const off = await b.page.evaluate(() => ({ g: window.__recorder.chain.gain.gain.value, ratio: window.__recorder.chain.compressor.ratio.value }));
+  check("オフに戻すと素通しになる", off.ratio === 1, JSON.stringify(off));
+  await b.page.getByRole("button", { name: "一時停止" }).click();
+  await sleep(3000);
+  const c = contiguity(jobs(id));
+  check("切り替えをはさんでも区間に隙間が無い", c.gaps.length === 0, JSON.stringify(c.gaps));
+  await b.browser.close().catch(() => {});
+  crash(b.proc);
+}
+
+const all = { crash: scenarioCrash, offlinestart: scenarioOfflineStart, offlinecrash: scenarioOfflineCrash, order: scenarioOrder, enhance: scenarioEnhance, offline: scenarioOffline, background: scenarioBackground, errors: scenarioServerErrors, apifail: scenarioApiFailure };
 const pick = process.argv.slice(2);
 for (const [name, run] of Object.entries(all)) {
   if (pick.length && !pick.includes(name)) continue;

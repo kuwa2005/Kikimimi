@@ -51,9 +51,21 @@ export async function request(path: string, options: RequestOptions = {}): Promi
     body = JSON.stringify(options.body);
   }
   if (method !== "GET" && csrf) headers["X-CSRF-Token"] = csrf;
-  const response = await fetch(path, { method, headers, body, signal: options.signal });
+  let response: Response;
+  try {
+    response = await fetch(path, { method, headers, body, signal: options.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    // 回線が無い・サーバに届かない。status 0 の ApiError にして、呼び出し側が見分けられるようにする。
+    throw new ApiError("サーバに接続できません（オフラインか、回線が不安定です）", 0, "network");
+  }
   if (!response.ok) throw await toError(response);
   return response;
+}
+
+/** 回線やサーバに届かなかった失敗か（送り直せば通る見込みがある）。 */
+export function isNetworkError(err: unknown): boolean {
+  return err instanceof ApiError && err.code === "network";
 }
 
 export async function toError(response: Response): Promise<ApiError> {

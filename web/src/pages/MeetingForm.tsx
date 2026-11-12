@@ -12,6 +12,7 @@ import { setDetail } from "../state/meeting";
 import { notify } from "../state/notices";
 import { Notices } from "../components/Notices";
 import { Meter } from "../components/Meter";
+import { EnhanceToggle } from "../components/Enhance";
 
 function fromDetail(detail: MeetingDetail): Form {
   const questions = detail.questions.map((q) => q.body);
@@ -336,6 +337,7 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
               {testing ? "テストをやめる" : "マイクをテスト"}
             </button>
             <Meter active={testing} label="マイクのテストの音量" />
+            <EnhanceToggle />
           </div>
           <p className="hint">名前が出ないときは「マイクをテスト」を押して使用を許可してください。</p>
           <label className="check">

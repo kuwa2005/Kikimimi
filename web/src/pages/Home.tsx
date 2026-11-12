@@ -1,4 +1,7 @@
 import { useEffect, useState } from "react";
+import { localHash, localMeetings } from "../state/offline";
+import { session as sessionStore } from "../state/session";
+import { useStore as useLocalStore } from "../lib/store";
 import { api, errorMessage, request } from "../api/client";
 import type { Folder, Meeting, MeetingList, Settings } from "../api/types";
 import { fmt, fmtLocal, statusLabel } from "../lib/format";
@@ -290,6 +293,7 @@ export function Home() {
   );
 
   const current = folders.find((item) => String(item.id) === folder);
+  const offline = !!useLocalStore(sessionStore).offline;
   const run = (task: Promise<unknown>) => void task.catch((err) => notify(errorMessage(err), "error"));
 
   return (
@@ -308,7 +312,8 @@ export function Home() {
         </a>
       </header>
       <Notices />
-      {!keySet ? (
+      <LocalMeetings />
+      {!keySet && !offline ? (
         <div className="banner">
           AI の APIキーは未登録です。Chrome の音声認識なら、キーなしで文字起こしできます。要約や、録音からの確定には
           <a href="#/settings">設定画面</a>でキーを登録してください。
@@ -407,5 +412,28 @@ export function Home() {
         </>
       )}
     </div>
+  );
+}
+
+/** この端末にだけある（まだサーバへ引き継いでいない）会議。オフラインの間も開ける。 */
+function LocalMeetings() {
+  const list = useLocalStore(localMeetings);
+  const offline = !!useLocalStore(sessionStore).offline;
+  if (!list.length && !offline) return null;
+  return (
+    <section className="panel" aria-labelledby="local-head">
+      <h2 id="local-head">この端末に保存している会議</h2>
+      {offline ? <p className="muted small">サーバにつながっていません。「＋ 新しい会議」から、オフラインのまま録音を始められます。つながると自動で送ります。</p> : null}
+      {list.length ? (
+        <div className="local-list">
+          {list.map((m) => (
+            <div key={m.localId} className="row">
+              <a href={localHash(m.localId)}>{m.title}</a>
+              <span className="muted small">{m.finishClose != null ? "終了・送信待ち" : m.serverId ? "引き継ぎ中" : "サーバ未登録"}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
   );
 }

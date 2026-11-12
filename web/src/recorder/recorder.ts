@@ -6,7 +6,7 @@
 import { ApiError, limitText, request } from "../api/client";
 import type { UsageItem } from "../api/types";
 import { createStore } from "../lib/store";
-import { pref, PREF_MIC, PREF_TAB, savePref } from "../lib/prefs";
+import { pref, PREF_ENHANCE, PREF_MIC, PREF_TAB, savePref } from "../lib/prefs";
 import { notify, clearNotice } from "../state/notices";
 import * as vault from "./vault";
 
@@ -22,7 +22,10 @@ type QueueItem = {
   meetingId: number;
   userId: number;
   startMs: number;
-  wav: Uint8Array;
+  /** 音声。端末の保管庫に書き終えたらメモリから外し（長いオフラインでもメモリを使い切らない）、送るときに読み戻す。 */
+  wav: Uint8Array | null;
+  /** WAV のバイト数（wav を外したあとも長さを知るため）。 */
+  bytes: number;
   silent: boolean;
   /** 端末の保管庫に書き終えたときの番号（書けなかったら null）。 */
   saved: Promise<number | null>;
@@ -77,7 +80,21 @@ const cap = {
   releaseLock: null as (() => void) | null,
   includeTab: false,
   vad: { floor: 0.005, energy: 0, count: 0, speech: 0, silenceRun: 0 },
+  /** 音声強化（小さい声・雑音の多い場所向け）。マイクの音を録音・速報字幕に渡す前に整える。 */
+  enhance: pref(PREF_ENHANCE) === "1",
+  chain: null as { highpass: BiquadFilterNode; compressor: DynamicsCompressorNode; gain: GainNode } | null,
+  autoGain: 1,
+  /** 発話の音量の目安（直近）。声が小さい・雑音が多いことの見張りに使う。 */
+  speechRms: 0,
+  quietSince: 0,
+  loudAt: 0,
+  mutedWarned: false,
+  lowBatteryWarned: false,
+  noisySince: 0,
+  suggested: false,
 };
+
+const ENHANCE = { target: 0.1, maxGain: 12, minGain: 1 };
 
 export type RecorderSnapshot = {
   capturing: boolean;
@@ -88,6 +105,8 @@ export type RecorderSnapshot = {
   micProblem: string;
   queued: Record<number, number>;
   queueLength: number;
+  enhance: boolean;
+  gain: number;
   parked: number;
   captionsPending: number;
   vaultOk: boolean;
@@ -107,6 +126,8 @@ function snapshot(): RecorderSnapshot {
     micProblem: cap.micProblem,
     queued,
     queueLength: cap.queue.length,
+    enhance: cap.enhance,
+    gain: Math.round(cap.autoGain * 10) / 10,
     parked: cap.parked.length,
     captionsPending: cap.captionQueue.length,
     vaultOk: cap.vaultOk,
@@ -130,6 +151,8 @@ function publish() {
     prev.micProblem === next.micProblem &&
     prev.queueLength === next.queueLength &&
     prev.parked === next.parked &&
+    prev.enhance === next.enhance &&
+    prev.gain === next.gain &&
     prev.captionsPending === next.captionsPending &&
     prev.vaultOk === next.vaultOk &&
     prev.pumping === next.pumping &&
@@ -320,6 +343,88 @@ function resetVad() {
   Object.assign(cap.vad, { energy: 0, count: 0, speech: 0, silenceRun: 0 });
 }
 
+/**
+ * 自動ゲイン。発話の音量が目安より小さければゆっくり上げ、割れそうならすぐ下げる。
+ * 入ってくる音はすでにゲインがかかったあとなので、目安との比で少しずつ動かす。
+ */
+function adjustGain(rms: number) {
+  if (!cap.enhance || !cap.chain) return;
+  let next = cap.autoGain;
+  if (rms > 0.5) next *= 0.85;
+  else if (rms < ENHANCE.target * 0.7) next *= 1.004;
+  else if (rms > ENHANCE.target * 1.6) next *= 0.99;
+  next = Math.max(ENHANCE.minGain, Math.min(ENHANCE.maxGain, next));
+  if (Math.abs(next - cap.autoGain) > 1e-4) {
+    cap.autoGain = next;
+    const ctx = cap.ctx;
+    if (ctx) cap.chain.gain.gain.setTargetAtTime(next, ctx.currentTime, 0.05);
+  }
+}
+
+/** 声が小さい・雑音が多い状態が続いたら、音声強化を勧める（一度だけ）。 */
+function watchQuality() {
+  if (!cap.capturing) return;
+  const now = Date.now();
+  if (!cap.micProblem && cap.loudAt && now - cap.loudAt > 15000 && !cap.mutedWarned) {
+    cap.mutedWarned = true;
+    notify("15 秒以上、マイクの音がほぼ無音です。マイクがミュート（消音）になっていないか、選んだマイクが正しいか確かめてください。録音は続けています。", "warn", "mic-silent");
+  } else if (cap.loudAt && now - cap.loudAt < 1000 && cap.mutedWarned) {
+    cap.mutedWarned = false;
+    clearNotice("mic-silent");
+  }
+  if (cap.enhance || cap.suggested) return;
+  const quiet = cap.speechRms > 0 && cap.speechRms < 0.02;
+  const noisy = cap.vad.floor > 0.03;
+  cap.quietSince = quiet ? cap.quietSince || now : 0;
+  cap.noisySince = noisy ? cap.noisySince || now : 0;
+  if ((cap.quietSince && now - cap.quietSince > 20000) || (cap.noisySince && now - cap.noisySince > 20000)) {
+    cap.suggested = true;
+    notify(
+      quiet
+        ? "声が小さく録れています。「音声強化」をオンにすると、音量を自動で持ち上げます。マイクを話す人に近づけるのも効果があります。"
+        : "周りの雑音が大きいようです。「音声強化」をオンにすると、低い雑音を削り、声を聞き取りやすくします。",
+      "warn",
+      "enhance",
+    );
+  }
+}
+
+/** 音声強化を切り替える。録音中でも、そのまま切り替わる。 */
+export function setEnhance(on: boolean) {
+  cap.enhance = on;
+  savePref(PREF_ENHANCE, on ? "1" : "0");
+  applyEnhance();
+  clearNotice("enhance");
+  publish();
+}
+
+function applyEnhance() {
+  const chain = cap.chain;
+  const ctx = cap.ctx;
+  if (!chain || !ctx) return;
+  const t = ctx.currentTime;
+  if (cap.enhance) {
+    // 空調・机の振動など、声より低い雑音を削る。
+    chain.highpass.frequency.setValueAtTime(110, t);
+    // 大きい声と小さい声の差を縮める。
+    chain.compressor.threshold.setValueAtTime(-38, t);
+    chain.compressor.knee.setValueAtTime(18, t);
+    chain.compressor.ratio.setValueAtTime(4, t);
+    chain.compressor.attack.setValueAtTime(0.004, t);
+    chain.compressor.release.setValueAtTime(0.25, t);
+    chain.gain.gain.setTargetAtTime(cap.autoGain, t, 0.05);
+  } else {
+    chain.highpass.frequency.setValueAtTime(10, t);
+    chain.compressor.threshold.setValueAtTime(0, t);
+    chain.compressor.knee.setValueAtTime(0, t);
+    chain.compressor.ratio.setValueAtTime(1, t);
+    chain.gain.gain.setTargetAtTime(1, t, 0.05);
+  }
+  // ブラウザ側の自動音量調整と雑音抑制（マイクの入力音量そのものを上げる環境もある）。
+  const track = cap.stream?.getAudioTracks()[0];
+  track?.applyConstraints({ autoGainControl: true, noiseSuppression: true, echoCancellation: true }).catch(() => {});
+}
+
 // 20ms ごとの音量で発話か無音かを判定する。雑音の大きさには追従させる。
 function closeFrame(power: number) {
   const vad = cap.vad;
@@ -328,6 +433,8 @@ function closeFrame(power: number) {
   vad.floor = rms < vad.floor ? vad.floor * 0.8 + rms * 0.2 : Math.min(vad.floor * 1.001, rms);
   const speech = rms > Math.max(vad.floor * 3, 0.006);
   if (speech) {
+    cap.speechRms = cap.speechRms * 0.98 + rms * 0.02;
+    adjustGain(rms);
     vad.speech += 1;
     vad.silenceRun = 0;
   } else {
@@ -342,7 +449,13 @@ function closeFrame(power: number) {
 
 function onPcm(samples: Float32Array) {
   if (!samples || !samples.length) return;
-  cap.lastPcmAt = Date.now();
+  const now = Date.now();
+  // 音が数秒以上途切れていた（PC のスリープ・音声処理の停止）。その間は録音できていないことを知らせる。
+  if (cap.capturing && cap.lastPcmAt && now - cap.lastPcmAt > 5000) {
+    const gap = Math.round((now - cap.lastPcmAt) / 1000);
+    notify(`約 ${gap} 秒間、音声が途切れていました（PC のスリープや省電力の可能性）。その間は録音されていません。録音は再開しています。`, "warn", "gap");
+  }
+  cap.lastPcmAt = now;
   if (cap.micProblem) {
     cap.micProblem = "";
     cap.recoveries = 0;
@@ -351,6 +464,8 @@ function onPcm(samples: Float32Array) {
   let energy = 0;
   for (let i = 0; i < samples.length; i += 16) energy += samples[i] * samples[i];
   cap.level = Math.sqrt(energy / Math.max(1, samples.length / 16));
+  // ほぼ無音（ミュートのまま・マイクの音量が 0）。音は届いているので「届いていない」とは別に見張る。
+  if (cap.level > 0.0004) cap.loudAt = now;
   if (!cap.capturing) return;
   cap.buffers.push(samples);
   cap.buffered += samples.length;
@@ -416,7 +531,7 @@ function vaultFailed(err: unknown) {
   }
 }
 
-function persistChunk(item: Omit<QueueItem, "saved">): Promise<number | null> {
+function persistChunk(item: Omit<QueueItem, "saved"> & { wav: Uint8Array }): Promise<number | null> {
   return vault
     .putChunk({
       userId: item.userId,
@@ -452,11 +567,66 @@ export function cutChunk() {
   if (!down.length) return;
   const startMs = Math.round(cap.sentSamples / 16);
   cap.sentSamples += down.length;
-  const base = { meetingId: cap.meetingId, userId: cap.userId, startMs, wav: encodeWav(down, 16000), silent };
+  const wav = encodeWav(down, 16000);
+  const base = { meetingId: cap.meetingId, userId: cap.userId, startMs, wav, bytes: wav.byteLength, silent };
   // 送る前に端末へ書く。送信が成功したら消す。
-  cap.queue.push({ ...base, saved: persistChunk(base) });
+  const item: QueueItem = { ...base, saved: persistChunk(base) };
+  // 端末に書けた区間は、送れないまま溜まり始めたらメモリから外す（送るときに保管庫から読み戻す）。
+  void item.saved.then((id) => {
+    if (id != null && cap.queue.indexOf(item) > 2) item.wav = null;
+  });
+  cap.queue.push(item);
   publish();
   void pumpUploads();
+}
+
+/** 送る直前に音声を用意する。メモリから外していれば保管庫から読み戻す。 */
+async function wavOf(item: QueueItem): Promise<Uint8Array | null> {
+  if (item.wav) return item.wav;
+  const id = await item.saved;
+  if (id == null) return null;
+  const row = await vault.getChunk(id).catch(() => undefined);
+  return row ? new Uint8Array(row.wav) : null;
+}
+
+async function sendAudio(item: QueueItem) {
+  const wav = await wavOf(item);
+  if (!wav) return false;
+  await request(`/api/meetings/${item.meetingId}/audio`, { method: "POST", headers: audioHeaders(item), raw: wav as unknown as BodyInit });
+  return true;
+}
+
+// ---- オフラインで始めた会議（負の番号）。つながったらサーバに会議を作って番号を付け替える。
+type LocalBinder = (localId: number) => Promise<number | null>;
+let localBinder: LocalBinder = async () => null;
+/** オフラインの会議をサーバに作る処理を登録する（offline.ts）。作れたらサーバの会議番号を返す。 */
+export function setLocalBinder(binder: LocalBinder) {
+  localBinder = binder;
+}
+
+let sessionRefresher: () => Promise<boolean> = async () => true;
+/** CSRF の取り直し（オフラインから戻った直後など）に使う処理を登録する。 */
+export function setSessionRefresher(fn: () => Promise<boolean>) {
+  sessionRefresher = fn;
+}
+
+function transient(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return true;
+  // 画面がサーバの合言葉（CSRF）をまだ持っていない（オフラインから戻った直後）も、送り直せば通る。
+  return err.status === 0 || err.status >= 500 || err.status === 408 || err.status === 429 || (err.status === 403 && err.code === "csrf");
+}
+
+/** オフラインの会議に付けていた番号を、メモリ上のすべての待ち行列と録音中の状態で付け替える。 */
+export function rebindLocal(localId: number, serverId: number) {
+  for (const list of [cap.queue, cap.parked, cap.captionQueue] as { meetingId: number }[][]) {
+    for (const item of list) if (item.meetingId === localId) item.meetingId = serverId;
+  }
+  if (cap.meetingId === localId) {
+    cap.meetingId = serverId;
+    if (cap.capturing) holdRecLock(serverId);
+  }
+  if (cap.tailMeeting === localId) cap.tailMeeting = serverId;
+  publish();
 }
 
 function audioHeaders(item: QueueItem): Record<string, string> {
@@ -492,11 +662,19 @@ async function pumpUploads() {
     while (cap.queue.length && !cap.paused) {
       const item = cap.queue[0];
       try {
-        await request(`/api/meetings/${item.meetingId}/audio`, {
-          method: "POST",
-          headers: audioHeaders(item),
-          raw: item.wav as unknown as BodyInit,
-        });
+        if (item.meetingId < 0) {
+          // オフラインで始めた会議。まずサーバに会議を作る（作れるまで待つ）。
+          const serverId = await localBinder(item.meetingId);
+          if (serverId == null) throw new ApiError("会議をまだサーバに作れていません", 0, "network");
+          continue;
+        }
+        if (!(await sendAudio(item))) {
+          // 端末にも音声が無い（保管庫が消された）。送りようがない。
+          cap.queue.shift();
+          notify("端末の保管庫から録音区間を読み出せませんでした。", "error", "upload-drop");
+          publish();
+          continue;
+        }
         cap.queue.shift();
         forget(item);
         delay = 800;
@@ -534,7 +712,9 @@ async function pumpUploads() {
           limitHandler(item.meetingId, err.limit);
           continue;
         }
-        if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+        if (transient(err)) {
+          if (status === 403) await sessionRefresher();
+        } else if (status >= 400 && status < 500) {
           // 会議が終了したなど、今は受け付けられない。捨てずに端末へ残し、あとで取り込みとして送る。
           cap.queue.shift();
           if (status === 409 && recordingHere(item.meetingId) && !item.late) {
@@ -595,7 +775,11 @@ async function pumpParked() {
     for (const item of [...cap.parked]) {
       if (cap.paused) break;
       try {
-        await request(`/api/meetings/${item.meetingId}/audio`, { method: "POST", headers: audioHeaders(item), raw: item.wav as unknown as BodyInit });
+        if (item.meetingId < 0 && (await localBinder(item.meetingId)) == null) continue;
+        if (!(await sendAudio(item))) {
+          cap.parked = cap.parked.filter((q) => q !== item);
+          continue;
+        }
         cap.parked = cap.parked.filter((q) => q !== item);
         forget(item);
       } catch (err) {
@@ -646,6 +830,11 @@ async function pumpCaptions() {
     while (cap.captionQueue.length && !cap.paused) {
       const item = cap.captionQueue[0];
       try {
+        if (item.meetingId < 0) {
+          const serverId = await localBinder(item.meetingId);
+          if (serverId == null) throw new ApiError("会議をまだサーバに作れていません", 0, "network");
+          continue;
+        }
         await request(`/api/meetings/${item.meetingId}/captions`, { method: "POST", body: { start_sec: item.startSec, text: item.text } });
         done();
         delay = 1000;
@@ -661,6 +850,7 @@ async function pumpCaptions() {
           done();
           continue;
         }
+        if (status === 403 && err instanceof ApiError && err.code === "csrf") await sessionRefresher();
         notify("書き起こしの保存を再試行します（この端末に保存済み）。", "warn", "caption");
         await waitOrWake(delay);
         delay = Math.min(delay * 2, 15000);
@@ -705,7 +895,11 @@ async function restoreVault(userId: number) {
   let chunks: vault.VaultChunk[] = [];
   let tails: vault.VaultTail[] = [];
   let lines: vault.VaultCaption[] = [];
+  let locals: vault.VaultMeeting[] = [];
   try {
+    // オフラインの会議で、サーバに作り終えたものは番号を付け替えてから読む。
+    locals = await vault.listMeetings();
+    for (const m of locals) if (m.serverId != null) await vault.rebindMeeting(m.localId, m.serverId);
     [chunks, tails, lines] = await Promise.all([vault.listChunks(), vault.listTails(), vault.listCaptions()]);
     vaultWorks();
   } catch (err) {
@@ -749,7 +943,8 @@ async function restoreVault(userId: number) {
       meetingId: row.meetingId,
       userId,
       startMs: row.startMs,
-      wav: new Uint8Array(row.wav),
+      wav: null,
+      bytes: row.wav.byteLength,
       silent: row.silent,
       late: row.late,
       saved: Promise.resolve(row.id as number),
@@ -760,8 +955,13 @@ async function restoreVault(userId: number) {
     seconds += vault.wavSamples(row.wav) / 16000;
   }
   let captionCount = 0;
+  const knownLines = new Set<number>();
+  for (const line of cap.captionQueue) {
+    const id = await line.saved;
+    if (id != null) knownLines.add(id);
+  }
   for (const line of lines) {
-    if (line.userId !== userId || line.id == null) continue;
+    if (line.userId !== userId || line.id == null || knownLines.has(line.id)) continue;
     cap.captionQueue.push({ meetingId: line.meetingId, userId, startSec: line.startSec, text: line.text, saved: Promise.resolve(line.id) });
     captionCount += 1;
   }
@@ -776,7 +976,7 @@ async function restoreVault(userId: number) {
 }
 
 /** 同じ利用者でログインし直したら、止めていた送信を再開する。別の利用者の分は端末に残し、送らない。 */
-export function resumeForUser(userId: number) {
+export function resumeForUser(userId: number, _offline = false) {
   currentUserId = userId;
   const foreign = (list: { userId: number }[]) => list.filter((item) => item.userId !== userId).length;
   const count = foreign(cap.queue) + foreign(cap.parked) + foreign(cap.captionQueue);
@@ -838,7 +1038,7 @@ export function resumeOffset(meetingId: number, serverSeconds: number): number {
   let end = Math.round((serverSeconds || 0) * 16000);
   for (const item of [...cap.queue, ...cap.parked]) {
     if (item.meetingId !== meetingId) continue;
-    end = Math.max(end, item.startMs * 16 + Math.max(0, (item.wav.byteLength - 44) / 2));
+    end = Math.max(end, item.startMs * 16 + Math.max(0, (item.bytes - 44) / 2));
   }
   if (cap.meetingId === meetingId) end = Math.max(end, cap.sentSamples);
   return end;
@@ -850,6 +1050,16 @@ export function queueLength(): number {
 
 export function queuedFor(id: number): number {
   return cap.queue.filter((item) => item.meetingId === id).length;
+}
+
+/** 送り直し待ち（取り込み）と、未送信の書き起こしの数。 */
+export function pendingFor(id: number): number {
+  return cap.parked.filter((item) => item.meetingId === id).length + cap.captionQueue.filter((item) => item.meetingId === id).length;
+}
+
+/** 待っている送信をすぐ起こす（回線が戻った・オフラインの会議を作ったとき）。 */
+export function kickUploads() {
+  kick();
 }
 
 export function queueBusy(): boolean {
@@ -887,7 +1097,7 @@ export async function listDevices(): Promise<MediaDeviceInfo[]> {
 }
 
 async function openMic(deviceId: string): Promise<MediaStream> {
-  const base = { channelCount: 1, echoCancellation: true, noiseSuppression: true };
+  const base = { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
   if (deviceId) {
     try {
       return await navigator.mediaDevices.getUserMedia({ audio: Object.assign({ deviceId: { exact: deviceId } }, base) });
@@ -970,7 +1180,19 @@ export function ensureAudio(): Promise<void> {
       };
       node = processor;
     }
-    const micSource = ctx.createMediaStreamSource(stream);
+    const rawMic = ctx.createMediaStreamSource(stream);
+    // マイクの音を整える経路（音声強化）。オフのときは素通しの値にしておき、録音中でも切り替えられる。
+    const highpass = ctx.createBiquadFilter();
+    highpass.type = "highpass";
+    highpass.Q.value = 0.7;
+    const compressor = ctx.createDynamicsCompressor();
+    const gain = ctx.createGain();
+    rawMic.connect(highpass);
+    highpass.connect(compressor);
+    compressor.connect(gain);
+    cap.chain = { highpass, compressor, gain };
+    applyEnhance();
+    const micSource = gain;
     micSource.connect(node);
     // 速報字幕（Chrome の音声認識）には、録音と同じ音（マイク＋タブ音声）を渡す。
     const mix = ctx.createMediaStreamDestination();
@@ -1010,8 +1232,54 @@ export function stopStream() {
   cap.ready = null;
   if (cap.ctx) cap.ctx.close().catch(() => {});
   cap.ctx = null;
+  cap.chain = null;
   cap.level = 0;
   publish();
+}
+
+/** 録音を始めるときの点検。端末の空き容量と電池を確かめ、危なければ先に知らせる。 */
+async function preflight() {
+  try {
+    const estimate = await navigator.storage?.estimate?.();
+    if (estimate?.quota != null && estimate.usage != null) {
+      const freeMb = (estimate.quota - estimate.usage) / 1024 / 1024;
+      // 1 時間の録音は約 115MB。オフラインで溜めても 1 時間分は持てるかを見る。
+      if (freeMb < 150) {
+        notify(`この端末の空き容量が少なくなっています（約 ${Math.round(freeMb)}MB）。回線が切れたときに録音を溜められる時間が短くなります。不要なファイルを消してください。`, "warn", "storage");
+      }
+    }
+  } catch {
+    // 調べられなくても録音は続ける
+  }
+  watchBattery();
+}
+
+let batteryWatched = false;
+async function watchBattery() {
+  if (batteryWatched) return;
+  const getBattery = (navigator as Navigator & { getBattery?: () => Promise<{ level: number; charging: boolean; addEventListener: (n: string, f: () => void) => void }> }).getBattery;
+  if (!getBattery) return;
+  try {
+    const battery = await getBattery.call(navigator);
+    batteryWatched = true;
+    const check = () => {
+      if (!cap.capturing) return;
+      if (!battery.charging && battery.level <= 0.15) {
+        if (!cap.lowBatteryWarned) {
+          cap.lowBatteryWarned = true;
+          notify(`電池の残りが ${Math.round(battery.level * 100)}% です。電源につないでください。電池が切れても、それまでの録音はこの端末に保存されています。`, "warn", "battery");
+        }
+      } else {
+        cap.lowBatteryWarned = false;
+        clearNotice("battery");
+      }
+    };
+    battery.addEventListener("levelchange", check);
+    battery.addEventListener("chargingchange", check);
+    check();
+  } catch {
+    // 取れない環境では見張らない
+  }
 }
 
 /** 画面が暗くなる・スクリーンセーバーが動くのを止める（録音中だけ）。 */
@@ -1067,7 +1335,10 @@ export function startCapturing(meetingId: number, userId: number, samples: numbe
   cap.recoveries = 0;
   cap.lastRecoveryAt = 0;
   cap.tailAt = Date.now();
+  cap.loudAt = Date.now();
+  cap.mutedWarned = false;
   currentUserId = userId;
+  void preflight();
   resetVad();
   clearNotice("mic");
   holdRecLock(meetingId);
@@ -1088,6 +1359,7 @@ export function haltCapture() {
 // 音が届かなくなったことを見張る。録音中の画面が無くても動く。
 setInterval(() => {
   if (!cap.capturing) return;
+  watchQuality();
   // 省電力・画面オフ・別のウィンドウへの切り替えで音声処理が止められたら、起こし直す。
   if (cap.ctx && cap.ctx.state !== "running" && cap.ctx.state !== "closed") cap.ctx.resume().catch(() => {});
   if (cap.micProblem) {
