@@ -673,6 +673,20 @@ async fn summarize(state: &AppState, meeting_id: i64) {
         .publish(meeting_id, json!({"type":"summarizing","running": true}))
         .await;
 
+    // API の文字起こしが打ち切りになった区間は、速報字幕の控えで埋めてから材料を読む。
+    let patched = {
+        let conn = state.db().lock().await;
+        match db::fill_gaps_from_backup(&conn, meeting_id) {
+            Ok(n) => n,
+            Err(err) => {
+                tracing::warn!(meeting_id, "速報字幕の控えで欠落を埋められません: {err:#}");
+                0
+            }
+        }
+    };
+    if patched > 0 {
+        tracing::info!(meeting_id, patched, "文字起こしが欠けた区間を、速報字幕の控えで埋めました");
+    }
     let loaded = {
         let conn = state.db().lock().await;
         let owner = db::meeting_owner(&conn, meeting_id).ok().flatten().flatten();
@@ -704,7 +718,7 @@ async fn summarize(state: &AppState, meeting_id: i64) {
     };
 
     if finish_close == "plain" {
-        let summary = note_gaps(export::plain_minutes(&minutes), missing);
+        let summary = note_gaps(export::plain_minutes(&minutes), missing, patched);
         {
             let conn = state.db().lock().await;
             if let Err(err) = db::save_summary(&conn, meeting_id, &summary, None) {
@@ -744,9 +758,9 @@ async fn summarize(state: &AppState, meeting_id: i64) {
     }
 
     let (summary, error) = match summary_result {
-        Ok(summary) => (note_gaps(summary, missing), None),
+        Ok(summary) => (note_gaps(summary, missing, patched), None),
         Err(err) => (
-            note_gaps(export::fallback_summary(&minutes, &err), missing),
+            note_gaps(export::fallback_summary(&minutes, &err), missing, patched),
             Some(err),
         ),
     };
@@ -1300,11 +1314,16 @@ async fn publish_done(state: &AppState, meeting_id: i64) {
         .await;
 }
 
-fn note_gaps(summary: String, missing: i64) -> String {
+fn note_gaps(summary: String, missing: i64, patched: i64) -> String {
     if missing <= 0 {
         return summary;
     }
-    format!("> 書き起こし欠落: {missing} 区間\n\n{summary}")
+    if patched > 0 {
+        return format!(
+            "> 書き起こし欠落: {missing} 区間（うち {patched} 区間は速報字幕で補いました。録音は残っています）\n\n{summary}"
+        );
+    }
+    format!("> 書き起こし欠落: {missing} 区間（録音は残っています）\n\n{summary}")
 }
 
 fn summary_context(minutes: &Minutes) -> String {

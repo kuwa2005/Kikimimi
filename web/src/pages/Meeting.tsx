@@ -5,7 +5,7 @@ import { fmt } from "../lib/format";
 import { useMediaQuery } from "../lib/media";
 import { pref, PREF_PANEL, savePref } from "../lib/prefs";
 import { useStore } from "../lib/store";
-import { localSeconds, recordingHere } from "../recorder/recorder";
+import { localSeconds, recordingHere, saveCaption } from "../recorder/recorder";
 import { copyText, exportMarkdown } from "../state/actions";
 import { guarded, useBusy } from "../state/busy";
 import { openDialog } from "../state/dialog";
@@ -129,15 +129,9 @@ function LiveView({ detail }: { detail: MeetingDetail }) {
     }
     // api: Chrome の速報 ＋ API の文字起こし。chrome: Chrome の音声認識だけを保存する。
     let alive = true;
-    setCaptionPersist(
-      speech === "chrome"
-        ? (line) => {
-            void api(`/api/meetings/${meetingId}/captions`, { method: "POST", body: { start_sec: line.chunkStart, text: line.text } }).catch((err) =>
-              notify(errorMessage(err), "error", "caption"),
-            );
-          }
-        : null,
-    );
+    // 確定文は端末に保存してから送る（届くまで端末に残る）。API の会議でも控えとして送り、
+    // API の文字起こしが失敗した区間の穴埋めに使う。
+    setCaptionPersist((line) => saveCaption(meetingId, line.chunkStart, line.text));
     void chromeCaptionMode().then((captionMode) => {
       if (!alive) return;
       configureCaptions(captionMode);

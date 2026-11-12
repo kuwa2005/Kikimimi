@@ -13,12 +13,12 @@ import {
   dropQueue,
   ensureAudio,
   haltCapture,
-  queuedFor,
+  parkQueue,
   queueLength,
   recorderState,
   recordingHere,
   resetAll,
-  sentSamples,
+  resumeOffset,
   startCapturing,
   stopCapturing,
   stopStream,
@@ -60,19 +60,24 @@ export function missingKeyName(settings: Settings): string {
   return providerName(settings.provider);
 }
 
-// 送り切れないときは、待つか破棄するかを利用者に選んでもらう。
+// 送り切れないときは、待つか、端末に残して先へ進むかを利用者に選んでもらう。録音は捨てない。
 export async function drainOrAsk(): Promise<boolean> {
   while (!(await drainQueue())) {
     const choice = await openDialog({
       title: "録音の送信が終わりません",
-      body: <p>未送信の録音が {queueLength()} 区間あります。ネットワークかサーバの状態を確認してください。</p>,
+      body: (
+        <>
+          <p>未送信の録音が {queueLength()} 区間あります。ネットワークかサーバの状態を確認してください。</p>
+          <p className="muted">未送信の録音はこの端末に保存済みです。先へ進んでも消えず、つながり次第この会議の録音として取り込みます。</p>
+        </>
+      ),
       confirm: "待つ",
       cancel: "操作をやめる",
-      extra: [{ label: "未送信分を破棄して進む", value: "drop" }],
+      extra: [{ label: "端末に残して先へ進む", value: "park" }],
     });
     if (!choice) return false;
-    if (choice._choice === "drop") {
-      dropQueue();
+    if (choice._choice === "park") {
+      parkQueue();
       return true;
     }
   }
@@ -182,9 +187,6 @@ export async function resumeMeeting(id: number) {
   if (rec.capturing && rec.meetingId !== id) {
     throw new Error("別の会議を録音中です。そちらを一時停止か終了してから再開してください");
   }
-  if (Object.keys(rec.queued).some((key) => Number(key) !== id)) {
-    throw new Error("別の会議の録音を送信中です。送り終わってから再開してください");
-  }
   useSavedTabPref();
   const open = currentDetail();
   if (open && open.meeting.id === id && (open.meeting.speech || "api") === "api") {
@@ -203,8 +205,8 @@ export async function resumeMeeting(id: number) {
     if (!recorderState.get().capturing) stopStream();
     throw err;
   }
-  // 続きの区間は、サーバが受け取った録音の長さから始める。既存の区間を上書きしない。
-  const already = queuedFor(id) ? sentSamples() : Math.round((detail.meeting.duration_sec || 0) * 16000);
+  // 続きの区間は、サーバが受け取った録音と、端末に残る未送信の区間の終わりから始める。既存の区間を上書きしない。
+  const already = resumeOffset(id, detail.meeting.duration_sec || 0);
   startCapturing(id, user.id, already);
   setDetail(detail);
 }
@@ -334,13 +336,14 @@ export function limitMessage(err: unknown): string | null {
 /** ログアウト。録音中・未送信があれば確かめ、画面に残した個人の情報をすべて消す。 */
 export async function logout() {
   const rec = recorderState.get();
-  if (rec.capturing || rec.queueLength) {
+  if (rec.capturing || rec.queueLength || rec.parked || rec.captionsPending) {
     const ok = await openDialog({
       title: "録音中です。ログアウトしますか？",
       body: (
         <p>
           {rec.capturing ? "録音を止めます。" : ""}
-          {rec.queueLength ? `未送信の録音 ${rec.queueLength} 区間は破棄されます。` : ""}
+          {rec.queueLength + rec.parked ? `未送信の録音 ${rec.queueLength + rec.parked} 区間は、この端末からも破棄されます。` : ""}
+          {rec.captionsPending ? `未送信の書き起こし ${rec.captionsPending} 件も破棄されます。` : ""}
           ログアウトすると、この端末に残した会議の準備内容も消えます。
         </p>
       ),
