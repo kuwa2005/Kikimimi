@@ -8,6 +8,11 @@ use std::io::Read;
 /// 展開後の上限。巨大な（または圧縮爆弾の）ファイルで止まらないようにする。
 const MAX_ENTRY: u64 = 64 * 1024 * 1024;
 const MAX_TEXT_CHARS: usize = 2_000_000;
+/// 1 ファイルで展開する合計の上限と、読むシート・項目の数の上限。
+/// 同じ圧縮データを指す項目を大量に並べた細工ファイルで、CPU とメモリを使い尽くされないようにする。
+const MAX_TOTAL: u64 = 256 * 1024 * 1024;
+const MAX_SHEETS: usize = 200;
+const MAX_ENTRIES: usize = 10_000;
 
 struct Entry {
     name: String,
@@ -33,7 +38,11 @@ fn entries(data: &[u8]) -> Result<Vec<Entry>, String> {
         .ok_or("Office の形式（ZIP）として読めません")?;
     let count = u16_at(data, end + 10).ok_or("壊れた ZIP です")? as usize;
     let mut at = u32_at(data, end + 16).ok_or("壊れた ZIP です")? as usize;
+    if count > MAX_ENTRIES {
+        return Err("ZIP の項目が多すぎます".into());
+    }
     let mut out = Vec::with_capacity(count);
+    let mut offsets = std::collections::HashSet::new();
     for _ in 0..count {
         if u32_at(data, at) != Some(0x0201_4b50) {
             return Err("壊れた ZIP です".into());
@@ -45,6 +54,10 @@ fn entries(data: &[u8]) -> Result<Vec<Entry>, String> {
         let comment_len = u16_at(data, at + 32).ok_or("壊れた ZIP です")? as usize;
         let offset = u32_at(data, at + 42).ok_or("壊れた ZIP です")? as usize;
         let name = String::from_utf8_lossy(data.get(at + 46..at + 46 + name_len).ok_or("壊れた ZIP です")?).to_string();
+        // 同じ位置を指す項目は正しい Office ファイルには無い（展開を何度も繰り返させる細工）。
+        if !offsets.insert(offset) {
+            return Err("壊れた ZIP です（同じ位置を指す項目があります）".into());
+        }
         out.push(Entry { name, method, compressed, offset });
         at += 46 + name_len + extra_len + comment_len;
     }
@@ -229,9 +242,20 @@ pub fn xlsx_text(data: &[u8]) -> Result<String, String> {
     if sheets.is_empty() {
         return Err("Excel のシートが見つかりません".into());
     }
+    if sheets.len() > MAX_SHEETS {
+        return Err(format!("シートが多すぎます（{} 枚。{MAX_SHEETS} 枚まで）", sheets.len()));
+    }
     let mut out = String::new();
+    let mut expanded: u64 = 0;
     for (index, (number, entry)) in sheets.iter().enumerate() {
+        if out.len() > MAX_TEXT_CHARS * 3 {
+            break;
+        }
         let xml = read_entry(data, entry)?;
+        expanded += xml.len() as u64;
+        if expanded > MAX_TOTAL {
+            return Err("ファイルの中身が大きすぎます".into());
+        }
         let name = names.get(index).cloned().unwrap_or_else(|| format!("シート{number}"));
         out.push_str(&format!("## {name}\n"));
         for row in texts_of(&xml, "row") {
@@ -352,5 +376,46 @@ mod tests {
     #[test]
     fn not_a_zip_is_an_error() {
         assert!(docx_text(b"plain text").is_err());
+    }
+}
+
+#[cfg(test)]
+mod bomb_tests {
+    use super::xlsx_text;
+
+    /// 1 つの圧縮データを、シート名の項目から何度も指させた細工ファイルは読まない。
+    #[test]
+    fn rejects_entries_sharing_one_payload() {
+        let mut data = Vec::new();
+        // ローカルヘッダ（無圧縮・名前 1 文字）と中身
+        data.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 22]);
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(b'x');
+        let central = data.len();
+        let count = 3u16;
+        for i in 0..count {
+            let name = format!("xl/worksheets/sheet{}.xml", i + 1);
+            data.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            data.extend_from_slice(&[0u8; 6]);
+            data.extend_from_slice(&0u16.to_le_bytes()); // method
+            data.extend_from_slice(&[0u8; 8]);
+            data.extend_from_slice(&0u32.to_le_bytes()); // compressed
+            data.extend_from_slice(&0u32.to_le_bytes());
+            data.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            data.extend_from_slice(&[0u8; 12]);
+            data.extend_from_slice(&0u32.to_le_bytes()); // offset（全部 0）
+            data.extend_from_slice(name.as_bytes());
+        }
+        let size = data.len() - central;
+        data.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 6]);
+        data.extend_from_slice(&count.to_le_bytes());
+        data.extend_from_slice(&(size as u32).to_le_bytes());
+        data.extend_from_slice(&(central as u32).to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        let err = xlsx_text(&data).unwrap_err();
+        assert!(err.contains("同じ位置"), "{err}");
     }
 }

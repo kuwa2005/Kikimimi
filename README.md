@@ -78,6 +78,7 @@ docker compose exec app kikimimi admin assign-legacy <ログインID>
 ```bash
 kikimimi admin list-users                 # 会員の一覧
 kikimimi admin reset-password <ログインID> # 仮パスワードを発行し、その会員のセッションをすべて失効させる
+kikimimi admin backup <保存先フォルダ>      # 動かしたまま DB・secret.key・録音・資料を写す
 ```
 
 パスワードを忘れた場合、ログイン画面から登録済みのメールアドレスへ再設定用の確認コードを送れます。届かないときは、運用者が `reset-password` で仮パスワードを発行し、本人はログイン後にアカウント画面で変更します。
@@ -91,6 +92,10 @@ kikimimi admin reset-password <ログインID> # 仮パスワードを発行し�
 | `KIKIMIMI_BIND` | `127.0.0.1` | 待ち受けアドレス。LAN から使うときは `0.0.0.0`（下記の注意を参照） |
 | `KIKIMIMI_WEB_DIR` | 実行ファイルの隣の `web` → `./web/dist` | 画面（ビルド済み）の場所 |
 | `KIKIMIMI_KNOWLEDGE_ROOT` | なし | 会員が「サーバ上の資料フォルダ」として指定できる範囲（カンマ区切り）。未設定なら指定できない（アップロードだけ） |
+| `KIKIMIMI_INVITE_CODE` | 暫定の既定値 | 会員登録に使う招待コード。本番では必ず変えてください |
+| `KIKIMIMI_FESS_HOSTS` | なし | 会員が設定できる FESS の接続先（カンマ区切りのホスト名、または ホスト名:ポート）。未設定なら FESS には接続しない（サーバから任意の宛先へ接続させないため） |
+| `RUST_LOG` | `kikimimi=info` | ログの詳しさ |
+| `KIKIMIMI_GEMINI_BASE` / `KIKIMIMI_OPENAI_BASE` / `KIKIMIMI_ANTHROPIC_BASE` | 各社の API | API の接続先（社内プロキシ経由にするとき・試験の模擬サーバ） |
 | `KIKIMIMI_FREE_DAILY_MEETINGS` | 30 | Free の、1日に開始できる会議数（`unlimited` で無制限。日付は `KIKIMIMI_USAGE_UTC_OFFSET`） |
 | `KIKIMIMI_FREE_MEETING_MINUTES` | 600 | Free の、1 会議の録音時間（分）。暫定で 10 時間 |
 | `KIKIMIMI_FREE_STORAGE_MB` | 1024 | Free の、録音の保存容量（MB） |
@@ -240,7 +245,13 @@ kikimimi.example.local {
 - `secret.key`: 秘密値の暗号鍵
 - `backup/`: 自動で残したバックアップ（DB の版を上げる前、`assign-legacy` の前）
 
-バックアップはサーバを止めてからフォルダごとコピーするか、動かしたまま SQLite の `.backup` を使ってください。スキーマは起動時に自動で最新版へ移行し、版を上げる前の DB を `backup/` に残します。
+バックアップは、動かしたまま次のコマンドで取れます。DB の一貫した写し・`secret.key`・録音・資料を、日時付きのフォルダへ写します。サーバを止めてからフォルダごとコピーしても構いません。
+
+```bash
+docker compose exec app kikimimi admin backup /data/backup
+```
+
+`secret.key` を失うと、保存した API キーを読めなくなります。DB と一緒に、外に漏れない場所へ保管してください。スキーマは起動時に自動で最新版へ移行し、版を上げる前の DB を `backup/` に残します。
 
 ## 開発
 

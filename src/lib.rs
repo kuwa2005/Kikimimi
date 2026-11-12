@@ -108,6 +108,7 @@ fn bind_addr() -> std::net::IpAddr {
 /// - `list-users`: 会員の一覧
 /// - `assign-legacy <ログインID>`: 会員制より前の会議・テンプレート・索引・共通設定を、その会員に移す
 /// - `reset-password <ログインID>`: 仮のパスワードを発行し、その会員のセッションをすべて失効させる
+/// - `backup <保存先フォルダ>`: 動かしたまま、DB（一貫した写し）・secret.key・録音・資料を保存先へ写す
 pub fn admin(args: &[String]) -> anyhow::Result<()> {
     let data_dir = default_data_dir();
     std::fs::create_dir_all(&data_dir)?;
@@ -148,9 +149,47 @@ pub fn admin(args: &[String]) -> anyhow::Result<()> {
             println!("{login} の仮パスワード: {password}");
             println!("ログイン後、アカウント画面でパスワードを変えるよう本人に伝えてください。");
         }
+        Some("backup") => {
+            let target = std::path::PathBuf::from(args.get(1).context("保存先のフォルダを指定してください")?);
+            let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+            let dest = target.join(format!("kikimimi-{stamp}"));
+            std::fs::create_dir_all(&dest)?;
+            // DB は動かしたままでも一貫した写しを作る。
+            conn.execute("VACUUM INTO ?1", [dest.join("kikimimi.sqlite").display().to_string()])?;
+            // secret.key が無いと、保存した API キーを読めない。必ず一緒に残す。
+            std::fs::copy(data_dir.join("secret.key"), dest.join("secret.key"))?;
+            let mut files = 0u64;
+            for entry in std::fs::read_dir(&data_dir)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !entry.file_type()?.is_dir() || name == "backup" || entry.path() == target || dest.starts_with(entry.path()) {
+                    continue;
+                }
+                files += copy_tree(&entry.path(), &dest.join(&name))?;
+            }
+            println!("バックアップしました: {}（DB・secret.key・ファイル {files} 件）", dest.display());
+            println!("secret.key は API キーの復号に要ります。DB と同じ場所で、外に漏れないよう保管してください。");
+        }
         _ => anyhow::bail!(
-            "使い方: kikimimi admin list-users | assign-legacy <ログインID> | reset-password <ログインID>"
+            "使い方: kikimimi admin list-users | assign-legacy <ログインID> | reset-password <ログインID> | backup <保存先フォルダ>"
         ),
     }
     Ok(())
+}
+
+/// フォルダを丸ごと写す。写したファイルの数を返す。
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<u64> {
+    std::fs::create_dir_all(to)?;
+    let mut count = 0;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            count += copy_tree(&entry.path(), &target)?;
+        } else if entry.file_type()?.is_file() {
+            std::fs::copy(entry.path(), &target)?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }

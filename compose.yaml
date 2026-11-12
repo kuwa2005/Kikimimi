@@ -27,6 +27,12 @@ services:
       KIKIMIMI_SMTP_PASSWORD: ${KIKIMIMI_SMTP_PASSWORD:-}
       KIKIMIMI_SMTP_FROM: ${KIKIMIMI_SMTP_FROM:-}
       KIKIMIMI_MAIL_DIR: ${KIKIMIMI_MAIL_DIR:-}
+      KIKIMIMI_INVITE_CODE: ${KIKIMIMI_INVITE_CODE:-}
+      KIKIMIMI_FESS_HOSTS: ${KIKIMIMI_FESS_HOSTS:-}
+      KIKIMIMI_ALLOW_CLOUD_SPEECH: ${KIKIMIMI_ALLOW_CLOUD_SPEECH:-}
+      KIKIMIMI_WORKERS: ${KIKIMIMI_WORKERS:-}
+      KIKIMIMI_USAGE_UTC_OFFSET: ${KIKIMIMI_USAGE_UTC_OFFSET:-+09:00}
+      RUST_LOG: ${RUST_LOG:-kikimimi=info}
       TZ: ${TZ:-Asia/Tokyo}
     volumes:
       - ${KIKIMIMI_HOST_DATA:-kikimimi-data}:/data
@@ -73,7 +79,7 @@ services:
     working_dir: /app
 
 volumes:
+  # 既存の環境ではこの名前のボリュームをそのまま使い、新しい環境では作る。
   kikimimi-data:
     name: kikimimi_kikimimi-data
-    external: true
   cargo-registry:

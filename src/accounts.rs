@@ -63,9 +63,15 @@ pub fn normalize_email(raw: &str) -> Result<String, &'static str> {
     Ok(email)
 }
 
-/// 暫定の招待コード。前後の空白は無視し、大文字小文字は区別する。
+/// 招待コード。運用者が `KIKIMIMI_INVITE_CODE` で決める（未設定なら暫定の既定値）。
+/// 前後の空白は無視し、大文字小文字は区別する。
 pub fn invite_matches(raw: &str) -> bool {
-    same_text(raw.trim(), "docomo2")
+    let expected = std::env::var("KIKIMIMI_INVITE_CODE")
+        .ok()
+        .map(|code| code.trim().to_string())
+        .filter(|code| !code.is_empty())
+        .unwrap_or_else(|| "docomo2".to_string());
+    same_text(raw.trim(), &expected)
 }
 
 /// 以前からのログインIDを正規化する。規則に合わなければエラーコードを返す。
@@ -657,6 +663,27 @@ pub fn storage_used(conn: &Connection, user_id: i64) -> Result<i64> {
         [user_id],
         |row| row.get(0),
     )?)
+}
+
+/// 会議に添付した資料の合計バイト数。
+pub fn docs_used(conn: &Connection, user_id: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(d.bytes), 0) FROM meeting_docs d JOIN meetings m ON m.id = d.meeting_id WHERE m.user_id=?1",
+        [user_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// 資料を置けるか。資料は録音を含めた保存容量の空きの範囲でだけ置ける。
+/// 録音の受け付け（gate_audio）には資料を数えない。資料で枠が埋まって会議の録音が止まらないようにする。
+pub fn gate_doc(conn: &Connection, user_id: i64, bytes: i64, limits: &Limits) -> Result<()> {
+    if let Some(limit) = limits.storage_bytes {
+        let used = storage_used(conn, user_id)? + docs_used(conn, user_id)?;
+        if used + bytes > limit {
+            return Err(exceeded("storage_bytes", "録音と資料の保存容量", used, limit, "バイト", None));
+        }
+    }
+    Ok(())
 }
 
 /// 会議で受け付けた録音の長さ（ミリ秒）。区間の音声から測った値で、クライアントの時計は使わない。

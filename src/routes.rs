@@ -2658,12 +2658,14 @@ async fn upload_meeting_doc(
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    let limits = limits_of(&state, &user).await?;
     {
         let conn = state.db().lock().await;
         let count = db::list_meeting_docs(&conn, id).map_err(internal)?.len() as i64;
         if count >= db::MAX_MEETING_DOCS {
             return Err(bad(format!("顧客資料は1会議{}件までです", db::MAX_MEETING_DOCS)));
         }
+        accounts::gate_doc(&conn, user.id, body.len() as i64, &limits).map_err(rejected)?;
     }
     let dir = knowledge::meeting_docs_dir(&state, id);
     tokio::fs::create_dir_all(&dir).await.map_err(|err| internal(err.into()))?;

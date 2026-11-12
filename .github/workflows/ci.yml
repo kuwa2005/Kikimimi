@@ -1,0 +1,36 @@
+# プッシュとプルリクエストのたびに、サーバのテストと画面のビルド（型検査込み）を確かめる。
+# 録音の耐性の試験（e2e/）は本物のブラウザとサーバを使うので、ここでは回さない（e2e/README.md）。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: テスト
+        run: cargo test --release --locked
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: 型検査とビルド
+        run: npm run build
