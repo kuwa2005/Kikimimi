@@ -596,7 +596,7 @@ async function wavOf(item: QueueItem): Promise<Uint8Array | null> {
 async function sendAudio(item: QueueItem) {
   const wav = await wavOf(item);
   if (!wav) return false;
-  await request(`/api/meetings/${item.meetingId}/audio`, { method: "POST", headers: audioHeaders(item), raw: wav as unknown as BodyInit });
+  await request(`/api/meetings/${item.meetingId}/audio`, { method: "POST", headers: audioHeaders(item), raw: wav as unknown as BodyInit, timeoutMs: 60000 });
   return true;
 }
 
@@ -857,7 +857,7 @@ async function pumpCaptions() {
           else cap.blockedLocal.delete(item.meetingId);
           continue;
         }
-        await request(`/api/meetings/${item.meetingId}/captions`, { method: "POST", body: { start_sec: item.startSec, text: item.text } });
+        await request(`/api/meetings/${item.meetingId}/captions`, { method: "POST", body: { start_sec: item.startSec, text: item.text }, timeoutMs: 30000 });
         done();
         delay = 1000;
         clearNotice("caption");

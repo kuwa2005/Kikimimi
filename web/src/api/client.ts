@@ -39,6 +39,8 @@ export type RequestOptions = {
   raw?: BodyInit;
   headers?: Record<string, string>;
   signal?: AbortSignal;
+  /** この時間で応答が無ければ諦めて「つながらない」として扱う（半端に切れた回線で待ち続けない）。 */
+  timeoutMs?: number;
 };
 
 /** 応答をそのまま返す。エラーは ApiError にして投げる。 */
@@ -53,9 +55,10 @@ export async function request(path: string, options: RequestOptions = {}): Promi
   if (method !== "GET" && csrf) headers["X-CSRF-Token"] = csrf;
   let response: Response;
   try {
-    response = await fetch(path, { method, headers, body, signal: options.signal });
+    const signal = options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : options.signal;
+    response = await fetch(path, { method, headers, body, signal });
   } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    if (err instanceof DOMException && err.name === "AbortError" && !options.timeoutMs) throw err;
     // 回線が無い・サーバに届かない。status 0 の ApiError にして、呼び出し側が見分けられるようにする。
     throw new ApiError("サーバに接続できません（オフラインか、回線が不安定です）", 0, "network");
   }
