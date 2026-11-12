@@ -13,6 +13,7 @@
 | `offlinecrash` | オフラインで録音中にブラウザを落とし、オフラインのまま開き直して終了 → 回線が戻る | ホームに端末の会議が出る／（Cookie が消えていればログインし直して）会議の作成・送信・終了まで進む／落ちる直前までの録音が残る |
 | `order` | 会議中に字幕の並び順を切り替える | 新しい字幕が上になる／録音は止まらない／並び順を端末に記憶する |
 | `enhance` | 声の小さいマイク（音量 1/15）で、会議中に音声強化をオン・オフ | 発話の大きさが目安まで上がる／録音は止まらない／オフで素通しに戻る |
+| `agenda` | Chrome の音声認識だけの会議で、事前のアジェンダ（予算・導入時期・決裁者）に関係する発言と関係ない発言をする（Claude は模擬サーバ） | 関係する議題にだけ回答が入る／画面のアジェンダに出る／Claude には文字だけを送る／解析はまとめて行う／録音は止まらない |
 | `apifail` | ダミーの API キーで API 文字起こしを失敗させる | 失敗区間が速報字幕の控えで埋まり、議事録に欠落と補完が明記される |
 
 ## 実行
@@ -33,6 +34,7 @@ KIKIMIMI_DATA_DIR=/tmp/kikimimi-e2e/data KIKIMIMI_MAIL_DIR=/tmp/kikimimi-e2e/mai
 E2E_EMAIL=<試験用アカウント> E2E_PASSWORD=<そのパスワード> KIKIMIMI_DATA_DIR=/tmp/kikimimi-e2e/data node e2e/resilience.mjs
 ```
 
+- `agenda` は Claude の模擬サーバを使います。`python3 e2e/mock-claude.py 8799 /tmp/kikimimi-e2e/mock.log` を起動し、サーバを `KIKIMIMI_ANTHROPIC_BASE=http://127.0.0.1:8799/v1` 付きで起動して、試験に `E2E_MOCK_CLAUDE_LOG=/tmp/kikimimi-e2e/mock.log` を渡します。
 - 試験はサーバの DB を読み取り専用で開いて、録音区間の並びを確かめます（`python3` を使います）。
 - `apifail` は、試験用アカウントの Gemini キーをダミー値に書き換えます。本番のアカウントでは実行しないでください。
 - 作業ファイル（ブラウザのプロファイル・偽マイクの音声）は `e2e/.work/` に置きます。

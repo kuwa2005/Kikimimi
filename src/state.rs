@@ -14,8 +14,18 @@ struct Inner {
     notify: Notify,
     http: reqwest::Client,
     summarizing: std::sync::Mutex<HashSet<i64>>,
+    /// Chrome の音声認識の会議で、確定文からアジェンダを更新する解析の進み具合（会議ごと）。
+    caption_analysis: std::sync::Mutex<HashMap<i64, CaptionAnalysis>>,
     model_checks: std::sync::Mutex<HashMap<i64, ModelCheck>>,
     attempts: std::sync::Mutex<HashMap<String, (u32, Instant)>>,
+}
+
+/// 確定文の解析の状態。`analyzed_to` までの書き起こしは解析済み。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CaptionAnalysis {
+    pub analyzed_to: f64,
+    pub running: bool,
+    pub dirty: bool,
 }
 
 /// 設定画面に出す、モデル自動選択の進み具合。会員ごとに持つ。
@@ -46,6 +56,7 @@ impl AppState {
                 notify: Notify::new(),
                 http,
                 summarizing: std::sync::Mutex::new(HashSet::new()),
+                caption_analysis: std::sync::Mutex::new(HashMap::new()),
                 model_checks: std::sync::Mutex::new(HashMap::new()),
                 attempts: std::sync::Mutex::new(HashMap::new()),
             }),
@@ -101,6 +112,44 @@ impl AppState {
             .lock()
             .expect("summarizing")
             .contains(&meeting_id)
+    }
+
+    /// 新しい確定文が入ったことを記録する。解析の係がいなければ true（呼び出し側が係を立てる）。
+    pub fn note_caption(&self, meeting_id: i64) -> bool {
+        let mut map = self.inner.caption_analysis.lock().expect("caption_analysis");
+        let entry = map.entry(meeting_id).or_insert(CaptionAnalysis { analyzed_to: -1.0, ..Default::default() });
+        entry.dirty = true;
+        if entry.running {
+            return false;
+        }
+        entry.running = true;
+        true
+    }
+
+    /// 次に解析するか。新しい確定文が無ければ係を降りる（false）。
+    pub fn take_caption_work(&self, meeting_id: i64) -> Option<f64> {
+        let mut map = self.inner.caption_analysis.lock().expect("caption_analysis");
+        let entry = map.get_mut(&meeting_id)?;
+        if !entry.dirty {
+            entry.running = false;
+            return None;
+        }
+        entry.dirty = false;
+        Some(entry.analyzed_to)
+    }
+
+    pub fn set_caption_analyzed(&self, meeting_id: i64, upto: f64) {
+        if let Some(entry) = self.inner.caption_analysis.lock().expect("caption_analysis").get_mut(&meeting_id) {
+            entry.analyzed_to = entry.analyzed_to.max(upto);
+        }
+    }
+
+    /// 解析をやめる（会議が終わった・キーが無いなど）。次の確定文でまた始められる。
+    pub fn stop_caption_work(&self, meeting_id: i64) {
+        if let Some(entry) = self.inner.caption_analysis.lock().expect("caption_analysis").get_mut(&meeting_id) {
+            entry.running = false;
+            entry.dirty = false;
+        }
     }
 
     pub fn model_check(&self, user_id: i64) -> ModelCheck {

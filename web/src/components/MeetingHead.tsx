@@ -204,7 +204,7 @@ export function MeetingHead({ detail, extra }: { detail: MeetingDetail; extra?: 
         <SpeechLive detail={detail} />
         <p className="muted small lag" aria-live="polite">
           {ears && speech === "chrome"
-            ? "Chrome の音声認識で書き起こしています。APIキーは使っていません。"
+            ? "Chrome の音声認識で書き起こしています。回答・要約用のキーがあれば、書き起こしの文字（音声は送りません）からアジェンダの回答を更新します。"
             : ears && speech === "api" && here
               ? `Chrome の速報を出しています。${lagText(detail, here)}`
               : ears && speech === "off"

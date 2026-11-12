@@ -312,7 +312,7 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
           ) : null}
           <p className="hint">
             {form.speech === "chrome"
-              ? "Chrome の音声認識だけを使います。APIキーは不要です。端末内の言語パックがあるときは端末内で、無いときは Chrome 標準の音声認識で書き起こします。"
+              ? "Chrome の音声認識で書き起こします。APIキーは不要です。端末内の言語パックがあるときは端末内で、無いときは Chrome 標準の音声認識を使います。回答・要約用のキー（Claude など）を登録していれば、書き起こしの文字からアジェンダの回答も更新します（音声は送りません）。"
               : form.speech === "off"
                 ? "録音だけ残します。終了時に API で文字起こしするか、そのまま議事録にするかを選べます。"
                 : "Chrome の速報を出しながら、API で精度の高い文字起こしをします。"}

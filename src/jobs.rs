@@ -890,6 +890,102 @@ async fn fill_participants(
 
 /// 取り込んだ書き起こし（#96）を 1 分ほど・1500 文字ほどずつ AI に渡し、回答候補・メモ・資料を作る。
 /// 完了済みの会議なら、最後に要約を作り直す。
+/// Chrome の音声認識の会議で、確定文をまとめて解析する間隔。解析のたびに API 料金がかかるので詰めすぎない。
+const CAPTION_ANALYSIS_EVERY: Duration = Duration::from_secs(20);
+/// 1 回に渡す書き起こしの上限（文字数）。長く溜まったときは新しい方から渡す。
+const CAPTION_ANALYSIS_CHARS: usize = 1500;
+
+/// Chrome の確定文が保存されたら呼ぶ。回答・要約用のキー（Claude など）があれば、
+/// 一定の間隔で書き起こしの文字を解析し、アジェンダ（回答候補・いまの議題・メモ・資料検索）を更新する。
+/// 音声は送らない。キーが無い・文字起こしだけの会議・録音中でない会議では何もしない。
+pub fn spawn_caption_analysis(state: AppState, meeting_id: i64) {
+    if cfg!(test) || !state.note_caption(meeting_id) {
+        return;
+    }
+    tokio::spawn(async move {
+        // 最初の確定文から少し溜めてから解析する。
+        tokio::time::sleep(CAPTION_ANALYSIS_EVERY / 2).await;
+        let mut warned = false;
+        while let Some(cursor) = state.take_caption_work(meeting_id) {
+            match caption_window(&state, meeting_id, cursor).await {
+                Ok(Some(window)) => {
+                    let upto = window.last().map(|s| s.start_sec).unwrap_or(cursor);
+                    match analyze_imported(&state, meeting_id, &window).await {
+                        Ok(()) => state.set_caption_analyzed(meeting_id, upto),
+                        Err(err) => {
+                            if !warned {
+                                warned = true;
+                                state
+                                    .publish(meeting_id, json!({"type":"warning","message": format!("書き起こしからアジェンダを更新できませんでした: {err}")}))
+                                    .await;
+                            }
+                            tracing::warn!(meeting_id, "確定文の解析に失敗しました: {err}");
+                            if gemini::is_transient(&err) {
+                                // 次の回で、同じ範囲をもう一度解析する。
+                                state.note_caption(meeting_id);
+                            } else {
+                                state.set_caption_analyzed(meeting_id, upto);
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(reason) => {
+                    tracing::info!(meeting_id, "確定文からのアジェンダ更新を止めます: {reason}");
+                    state.stop_caption_work(meeting_id);
+                    return;
+                }
+            }
+            tokio::time::sleep(CAPTION_ANALYSIS_EVERY).await;
+        }
+    });
+}
+
+/// まだ解析していない書き起こし。解析しない会議なら Err（理由）、新しい文が無ければ None。
+async fn caption_window(state: &AppState, meeting_id: i64, cursor: f64) -> Result<Option<Vec<db::Segment>>, String> {
+    let conn = state.db().lock().await;
+    let meeting = db::get_meeting(&conn, meeting_id)
+        .map_err(|err| err.to_string())?
+        .ok_or("会議がありません")?;
+    if meeting.speech != "chrome" {
+        return Err("Chrome の音声認識の会議ではありません".into());
+    }
+    if meeting.transcript_only {
+        return Err("文字起こしだけの会議です".into());
+    }
+    if meeting.finish_requested || !matches!(meeting.status.as_str(), "live" | "paused") {
+        return Err("会議が進行中ではありません".into());
+    }
+    let owner = db::meeting_owner(&conn, meeting_id)
+        .map_err(|err| err.to_string())?
+        .flatten()
+        .ok_or("会議の持ち主が未設定です")?;
+    let settings = db::get_user_settings(&conn, owner).map_err(|err| err.to_string())?;
+    if !settings.has_chat_key() {
+        return Err("回答・要約用の API キーがありません".into());
+    }
+    let fresh: Vec<db::Segment> = db::list_segments(&conn, meeting_id)
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .filter(|segment| segment.start_sec > cursor + 1e-6)
+        .collect();
+    if fresh.is_empty() {
+        return Ok(None);
+    }
+    // 長く溜まっていたら、新しい方から上限まで。
+    let mut chars = 0;
+    let mut start = fresh.len();
+    while start > 0 {
+        let len = fresh[start - 1].text.chars().count();
+        if chars + len > CAPTION_ANALYSIS_CHARS && start < fresh.len() {
+            break;
+        }
+        chars += len;
+        start -= 1;
+    }
+    Ok(Some(fresh[start..].to_vec()))
+}
+
 pub fn spawn_text_import(state: AppState, meeting_id: i64, segments: Vec<db::Segment>) {
     tokio::spawn(async move {
         let mut windows: Vec<Vec<db::Segment>> = Vec::new();

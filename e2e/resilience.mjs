@@ -48,7 +48,9 @@ const FAKE_SR = `(() => {
       if (this._t) return;
       this._t = setInterval(() => {
         const n = (window.__srCount = (window.__srCount || 0) + 1);
-        this.onresult && this.onresult({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: "速報" + n } }] });
+        // 試験が台本（window.__srLines）を渡していれば、その順に話したことにする。
+        const text = (window.__srLines && window.__srLines.shift()) || "速報" + n;
+        this.onresult && this.onresult({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: text } }] });
       }, 1500);
     }
     stop() { clearInterval(this._t); this._t = null; this.onend && this.onend(); }
@@ -615,7 +617,67 @@ async function scenarioEnhance() {
   crash(b.proc);
 }
 
-const all = { crash: scenarioCrash, offlinestart: scenarioOfflineStart, offlinecrash: scenarioOfflineCrash, order: scenarioOrder, enhance: scenarioEnhance, offline: scenarioOffline, background: scenarioBackground, errors: scenarioServerErrors, apifail: scenarioApiFailure };
+async function scenarioAgenda() {
+  log("■ Chrome の音声認識だけの会議で、事前のアジェンダに関係する発言から回答をセットする（Claude）");
+  const mockLog = process.env.E2E_MOCK_CLAUDE_LOG;
+  if (!mockLog) {
+    check("Claude の模擬サーバを指定する（E2E_MOCK_CLAUDE_LOG と KIKIMIMI_ANTHROPIC_BASE、e2e/README.md）", false);
+    return;
+  }
+  fs.writeFileSync(mockLog, "");
+  const b = await launch(freshProfile("agenda"));
+  await login(b.page);
+  await closeLeftovers(b.page);
+  const saved = await api(b.page, "/api/settings", { method: "PUT", body: JSON.stringify({ provider: "anthropic", anthropic_api_key: "sk-ant-dummy-for-test-only" }) });
+  log(`  Claude のキー（ダミー）を登録: ${saved.status}`);
+  const created = await api(b.page, "/api/meetings", {
+    method: "POST",
+    body: JSON.stringify({ title: "アジェンダ更新試験", questions: ["予算はいくらか", "導入の時期はいつか", "決裁者は誰か"] }),
+  });
+  const id = created.body.meeting.id;
+  await b.page.goto(`${BASE}/#/m/${id}`);
+  await b.page.waitForSelector('input[type=radio][name$="-speech"]');
+  await b.page.locator('input[type=radio][name$="-speech"]').nth(1).check();
+  // 会議の発言（Chrome の確定文）の台本
+  await b.page.evaluate(() => {
+    window.__srLines = ["本日はよろしくお願いします", "予算は三百万円を考えています", "導入の時期は来年の四月です", "天気の話をしましょう", "決裁は営業部長が行います"];
+  });
+  await b.page.getByRole("button", { name: "会議開始（録音開始）" }).click();
+  await b.page.waitForFunction(() => window.__recorder && window.__recorder.capturing);
+  const answered = await waitFor(async () => {
+    const r = await api(b.page, `/api/meetings/${id}`);
+    const qs = r.body?.questions || [];
+    return qs.filter((q) => q.answer).length >= 3 ? qs : null;
+  }, 90000, 2000);
+  const qs = answered || (await api(b.page, `/api/meetings/${id}`)).body.questions;
+  for (const q of qs) log(`  議題「${q.body}」→ ${q.status}: ${q.answer || "（空）"}`);
+  const pick = (word) => qs.find((q) => q.body.includes(word));
+  check("Chrome の会議でも、事前のアジェンダに回答がセットされる", !!answered);
+  check("予算の議題に予算の発言が入る", (pick("予算")?.answer || "").includes("三百万円"));
+  check("導入時期の議題に時期の発言が入る", (pick("導入")?.answer || "").includes("来年の四月"));
+  check("決裁者の議題に決裁の発言が入る", (pick("決裁")?.answer || "").includes("営業部長"));
+  check("関係ない発言は回答に入らない", !qs.some((q) => (q.answer || "").includes("天気")));
+  // 狭い画面ではタブに分かれる。アジェンダのタブを開いて、議題の回答欄に出ているかを見る。
+  const tab = b.page.getByRole("tab", { name: "アジェンダ" });
+  if (await tab.count()) await tab.first().click();
+  const onScreen = await waitFor(async () => {
+    const answers = await b.page.locator(".q-answer").allTextContents();
+    return answers.some((text) => text.includes("三百万円")) && answers.some((text) => text.includes("営業部長")) ? answers : null;
+  }, 10000);
+  if (process.env.E2E_SHOTS) await b.page.screenshot({ path: path.join(process.env.E2E_SHOTS, "agenda-chrome.png") });
+  check("会議画面のアジェンダにも回答が出る", !!onScreen);
+  const calls = fs.readFileSync(mockLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const analyses = calls.filter((c) => c.kind === "analysis");
+  check("Claude へは書き起こしの文字だけを送り、音声は送らない", analyses.length > 0 && calls.every((c) => !c.has_audio), `解析 ${analyses.length} 回 / 最大 ${Math.max(...calls.map((c) => c.bytes))} バイト`);
+  check("解析はまとめて行う（確定文ごとに呼ばない）", analyses.length < 5, `確定文 5 件に対して 解析 ${analyses.length} 回`);
+  check("録音は止まらない", await b.page.evaluate(() => window.__recorder.capturing));
+  await b.page.getByRole("button", { name: "一時停止" }).click();
+  await api(b.page, "/api/settings", { method: "PUT", body: JSON.stringify({ provider: "gemini" }) });
+  await b.browser.close().catch(() => {});
+  crash(b.proc);
+}
+
+const all = { agenda: scenarioAgenda, crash: scenarioCrash, offlinestart: scenarioOfflineStart, offlinecrash: scenarioOfflineCrash, order: scenarioOrder, enhance: scenarioEnhance, offline: scenarioOffline, background: scenarioBackground, errors: scenarioServerErrors, apifail: scenarioApiFailure };
 const pick = process.argv.slice(2);
 for (const [name, run] of Object.entries(all)) {
   if (pick.length && !pick.includes(name)) continue;

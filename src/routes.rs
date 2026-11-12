@@ -1579,6 +1579,8 @@ async fn save_caption(
         state
             .publish(id, json!({"type":"segment","segment": segment}))
             .await;
+        // 回答・要約用のキーがあれば、書き起こしの文字からアジェンダを更新する（音声は送らない）。
+        jobs::spawn_caption_analysis(state.clone(), id);
     }
     Ok(Json(json!({"segment": segment})))
 }
