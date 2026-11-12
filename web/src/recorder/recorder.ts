@@ -76,6 +76,10 @@ const cap = {
   tailWriting: false,
   tailMeeting: null as number | null,
   restoredFor: null as number | null,
+  /** 端末の保管庫からの復元が終わるのを待つため（終わる前に録音を再開すると、前の録音と位置が重なる）。 */
+  restoring: null as Promise<void> | null,
+  /** サーバに作れないオフラインの会議（番号 → 次に試す時刻）。ほかの会議の送信を止めないよう後回しにする。 */
+  blockedLocal: new Map<number, number>(),
   wakeLock: null as { release: () => Promise<void>; released?: boolean } | null,
   releaseLock: null as (() => void) | null,
   includeTab: false,
@@ -660,22 +664,33 @@ async function pumpUploads() {
   let delay = 800;
   try {
     while (cap.queue.length && !cap.paused) {
-      const item = cap.queue[0];
+      // サーバに作れていないオフラインの会議は後回しにし、ほかの会議の区間を先に送る。
+      const now = Date.now();
+      const index = cap.queue.findIndex((q) => !(q.meetingId < 0 && (cap.blockedLocal.get(q.meetingId) || 0) > now));
+      if (index < 0) {
+        await waitOrWake(2000);
+        continue;
+      }
+      const item = cap.queue[index];
       try {
         if (item.meetingId < 0) {
-          // オフラインで始めた会議。まずサーバに会議を作る（作れるまで待つ）。
+          // オフラインで始めた会議。まずサーバに会議を作る。作れなければ 30 秒は後回しにする。
           const serverId = await localBinder(item.meetingId);
-          if (serverId == null) throw new ApiError("会議をまだサーバに作れていません", 0, "network");
+          if (serverId == null) {
+            cap.blockedLocal.set(item.meetingId, Date.now() + 30000);
+            continue;
+          }
+          cap.blockedLocal.delete(item.meetingId);
           continue;
         }
         if (!(await sendAudio(item))) {
           // 端末にも音声が無い（保管庫が消された）。送りようがない。
-          cap.queue.shift();
+          cap.queue.splice(cap.queue.indexOf(item), 1);
           notify("端末の保管庫から録音区間を読み出せませんでした。", "error", "upload-drop");
           publish();
           continue;
         }
-        cap.queue.shift();
+        cap.queue.splice(cap.queue.indexOf(item), 1);
         forget(item);
         delay = 800;
         clearNotice("upload");
@@ -695,7 +710,7 @@ async function pumpUploads() {
         }
         if (status === 404) {
           // 会議が削除された。送り先が無い。
-          cap.queue.shift();
+          cap.queue.splice(cap.queue.indexOf(item), 1);
           forget(item);
           if (recordingHere(item.meetingId)) stopCapturing("この会議は削除されたため、録音を止めました。");
           publish();
@@ -716,7 +731,7 @@ async function pumpUploads() {
           if (status === 403) await sessionRefresher();
         } else if (status >= 400 && status < 500) {
           // 会議が終了したなど、今は受け付けられない。捨てずに端末へ残し、あとで取り込みとして送る。
-          cap.queue.shift();
+          cap.queue.splice(cap.queue.indexOf(item), 1);
           if (status === 409 && recordingHere(item.meetingId) && !item.late) {
             stopCapturing("この会議は録音を受け付けなくなったため、録音を止めました。");
           }
@@ -828,11 +843,18 @@ async function pumpCaptions() {
   let delay = 1000;
   try {
     while (cap.captionQueue.length && !cap.paused) {
-      const item = cap.captionQueue[0];
+      const now = Date.now();
+      const index = cap.captionQueue.findIndex((q) => !(q.meetingId < 0 && (cap.blockedLocal.get(q.meetingId) || 0) > now));
+      if (index < 0) {
+        await waitOrWake(2000);
+        continue;
+      }
+      const item = cap.captionQueue[index];
       try {
         if (item.meetingId < 0) {
           const serverId = await localBinder(item.meetingId);
-          if (serverId == null) throw new ApiError("会議をまだサーバに作れていません", 0, "network");
+          if (serverId == null) cap.blockedLocal.set(item.meetingId, Date.now() + 30000);
+          else cap.blockedLocal.delete(item.meetingId);
           continue;
         }
         await request(`/api/meetings/${item.meetingId}/captions`, { method: "POST", body: { start_sec: item.startSec, text: item.text } });
@@ -856,7 +878,7 @@ async function pumpCaptions() {
         delay = Math.min(delay * 2, 15000);
       }
       function done() {
-        cap.captionQueue.shift();
+        cap.captionQueue.splice(cap.captionQueue.indexOf(item), 1);
         void item.saved.then((id) => (id == null ? undefined : vault.deleteCaption(id).catch(() => {})));
         publish();
       }
@@ -992,7 +1014,18 @@ export function resumeForUser(userId: number, _offline = false) {
   cap.paused = false;
   publish();
   kick();
-  void restoreVault(userId);
+  cap.restoring = restoreVault(userId).catch(() => {});
+}
+
+/** 端末の保管庫からの復元が終わるまで待つ。録音を再開する前に呼ぶ（前の録音と位置を重ねない）。 */
+export async function restoreDone(): Promise<void> {
+  await cap.restoring;
+}
+
+/** ほかのタブがこの会議を録音中か。2 つのタブで同じ会議を録ると、録音の位置が重なる。 */
+export async function recordingElsewhere(meetingId: number): Promise<boolean> {
+  if (recordingHere(meetingId)) return false;
+  return !(await lockFree(meetingId));
 }
 
 /** ログアウト時。録音を止め、未送信の区間も（利用者が破棄を選んだので）端末からも消す。 */
@@ -1012,8 +1045,24 @@ export function resetAll() {
   resetVad();
   releaseGuards();
   stopStream();
-  if (userId != null) void vault.forgetUser(userId).catch(() => {});
+  if (userId != null) void forgetExceptBusy(userId);
   publish();
+}
+
+/** ログアウトで端末の控えを消す。ほかのタブが録音中の会議の分は残す（そのタブの録音を壊さない）。 */
+async function forgetExceptBusy(userId: number) {
+  const locks = (navigator as Navigator & { locks?: LockManager }).locks;
+  let busy: number[] = [];
+  try {
+    const state = await locks?.query?.();
+    busy = (state?.held || [])
+      .map((lock) => lock.name?.match(/^kikimimi-rec-(-?\d+)$/)?.[1])
+      .filter((id): id is string => !!id)
+      .map(Number);
+  } catch {
+    busy = [];
+  }
+  await vault.forgetUser(userId, busy).catch(() => {});
 }
 
 /** 会議を削除したとき。その会議の未送信分を、メモリと端末から消す。 */
@@ -1027,9 +1076,9 @@ export function dropQueue(meetingId: number) {
 }
 
 /** 送り切れないまま先へ進むとき。未送信の区間は捨てず、端末に残して取り込みとして送り直す。 */
-export function parkQueue() {
-  const items = cap.queue;
-  cap.queue = [];
+export function parkQueue(meetingId?: number) {
+  const items = cap.queue.filter((item) => meetingId == null || item.meetingId === meetingId);
+  cap.queue = cap.queue.filter((item) => !items.includes(item));
   park(items, `未送信の録音 ${items.length} 区間はこの端末に保存しました。つながり次第、会議の録音として取り込みます。`);
 }
 
@@ -1067,12 +1116,16 @@ export function queueBusy(): boolean {
 }
 
 // 未送信の区間（と書き起こし）が無くなるまで待つ。時間内に送り切れなければ false。
-export function drainQueue(timeoutMs = 15000): Promise<boolean> {
+export function drainQueue(timeoutMs = 15000, meetingId?: number): Promise<boolean> {
   kick();
+  // 会議を指定したら、その会議の分だけを待つ（作れないオフライン会議など、ほかの会議の待ちに巻き込まれない）。
+  const mine = (item: { meetingId: number }) => meetingId == null || item.meetingId === meetingId;
   return new Promise((resolve) => {
     const started = Date.now();
     const timer = setInterval(() => {
-      if (!cap.queue.length && !cap.pumping && !cap.captionQueue.length && !cap.captionPumping) {
+      const left = cap.queue.some(mine) || cap.captionQueue.some(mine);
+      const busy = meetingId == null ? cap.pumping || cap.captionPumping : false;
+      if (!left && !busy) {
         clearInterval(timer);
         resolve(true);
       } else if (Date.now() - started > timeoutMs || cap.paused) {

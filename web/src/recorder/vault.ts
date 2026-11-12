@@ -250,12 +250,15 @@ export async function forgetMeeting(meetingId: number): Promise<void> {
 }
 
 /** ログアウトで未送信分の破棄を選んだとき、その利用者の保管分を消す。 */
-export async function forgetUser(userId: number): Promise<void> {
+export async function forgetUser(userId: number, keepMeetings: number[] = []): Promise<void> {
   await run(["chunks", "tail", "captions", "meetings"], "readwrite", async (tx) => {
     for (const name of ["chunks", "tail", "captions", "meetings"]) {
       const store = tx.objectStore(name);
-      const rows = (await reqValue(store.getAll())) as { id?: number; key?: string; localId?: number; userId: number }[];
-      for (const row of rows) if (row.userId === userId) store.delete((row.id ?? row.key ?? row.localId) as IDBValidKey);
+      const rows = (await reqValue(store.getAll())) as { id?: number; key?: string; localId?: number; userId: number; meetingId?: number }[];
+      for (const row of rows) {
+        const meeting = row.meetingId ?? row.localId;
+        if (row.userId === userId && !(meeting != null && keepMeetings.includes(meeting))) store.delete((row.id ?? row.key ?? row.localId) as IDBValidKey);
+      }
     }
   });
 }

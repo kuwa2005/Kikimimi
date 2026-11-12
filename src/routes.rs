@@ -731,13 +731,16 @@ async fn static_file(uri: axum::http::Uri) -> Response {
     });
     let file = if candidate.is_file() {
         candidate
+    } else if relative.starts_with("assets/") {
+        // 更新前の画面が古い資産を求めた。index.html を長期キャッシュ付きで返すと壊れた JS を掴み続けるので 404 にする。
+        return (StatusCode::NOT_FOUND, [(header::CACHE_CONTROL, "no-store")], "").into_response();
     } else {
         root.join("index.html")
     };
     match tokio::fs::read(&file).await {
         Ok(bytes) => {
             // ハッシュ付きの名前の資産は長く、HTML などは毎回確かめる。
-            let cache = if relative.starts_with("assets/") {
+            let cache = if relative.starts_with("assets/") && file.starts_with(root.join("assets")) {
                 "public, max-age=31536000, immutable"
             } else {
                 "no-store"
@@ -833,6 +836,10 @@ fn limit_error(limit: &LimitExceeded) -> AppError {
 fn rejected(err: anyhow::Error) -> AppError {
     if let Some(limit) = err.downcast_ref::<LimitExceeded>() {
         return limit_error(limit);
+    }
+    // DB・ディスクの一時的な失敗は 500（画面が送り直す）。400 にすると、送り直さずに捨てられる。
+    if err.chain().any(|cause| cause.is::<rusqlite::Error>() || cause.is::<std::io::Error>()) {
+        return internal(err);
     }
     let message = err.to_string();
     if message.contains("ありません") || message.contains("見つかりません") {

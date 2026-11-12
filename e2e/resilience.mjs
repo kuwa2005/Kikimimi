@@ -50,6 +50,14 @@ const FAKE_SR = `(() => {
       let pending = null;
       let index = 0;
       this._t = setInterval(() => {
+        // 試験が回線断を起こしている間は、本物と同じく network エラーのあと終わる。
+        if (window.__srNetworkDown) {
+          clearInterval(this._t);
+          this._t = null;
+          this.onerror && this.onerror({ error: "network" });
+          this.onend && this.onend();
+          return;
+        }
         if (!pending) {
           const n = (window.__srSeq = (window.__srSeq || 0) + 1);
           // 試験が台本（window.__srLines）を渡していれば、その順に話したことにする。
@@ -738,7 +746,131 @@ async function scenarioTiming() {
   crash(b.proc);
 }
 
-const all = { timing: scenarioTiming, agenda: scenarioAgenda, crash: scenarioCrash, offlinestart: scenarioOfflineStart, offlinecrash: scenarioOfflineCrash, order: scenarioOrder, enhance: scenarioEnhance, offline: scenarioOffline, background: scenarioBackground, errors: scenarioServerErrors, apifail: scenarioApiFailure };
+async function scenarioCrashResume() {
+  log("■ ブラウザが落ちた直後に、すぐ「録音を再開」を押す");
+  const profile = freshProfile("crashresume");
+  let b = await launch(profile);
+  await login(b.page);
+  const id = await startMeeting(b.page, "落ちてすぐ再開の試験");
+  await sleep(6000);
+  await b.context.route("**/api/meetings/*/audio", (route) => route.abort());
+  await sleep(12000);
+  const before = await localMs(b.page);
+  crash(b.proc);
+  await sleep(1000);
+  b = await launch(profile);
+  await login(b.page);
+  await b.page.goto(`${BASE}/#/m/${id}`);
+  // 復元を待たずに押す
+  await b.page.getByRole("button", { name: /録音を再開|再開/ }).first().click();
+  await b.page.waitForFunction(() => window.__recorder.capturing, null, { timeout: 20000 });
+  await sleep(8000);
+  await b.page.getByRole("button", { name: "一時停止" }).click();
+  await waitFor(async () => (await b.page.evaluate(() => window.__recorder.queue.length === 0)) || null, 30000);
+  const c = contiguity(jobs(id));
+  check("落ちる前の録音（途中保存まで）が消えずに残る", c.total >= before - 2600 + 6000, `server=${c.total}ms / 落ちる前=${before}ms + 再開後 約 8 秒`);
+  check("再開した続きが前の録音と重ならず、隙間も無い", c.gaps.length === 0, JSON.stringify(c.gaps));
+  await b.browser.close().catch(() => {});
+  crash(b.proc);
+}
+
+async function scenarioBlocked() {
+  log("■ サーバに作れないオフラインの会議があっても、ほかの会議の送信は止まらない");
+  const b = await launch(freshProfile("blocked"));
+  await primeOffline(b);
+  await startOffline(b, "作れないオフライン会議");
+  await sleep(6000);
+  await b.page.getByRole("button", { name: "一時停止" }).click();
+  // つながる前に、別の会議 B を録音中にしておく（Free は同時録音 1 件まで。オフラインの会議は作れない）
+  await b.context.setOffline(false);
+  await b.page.evaluate(() => window.dispatchEvent(new Event("online")));
+  const created = await api(b.page, "/api/meetings", { method: "POST", body: JSON.stringify({ title: "先に録音している会議 B", questions: [] }) });
+  const other = created.body.meeting.id;
+  await b.page.goto(`${BASE}/#/m/${other}`);
+  await b.page.waitForSelector('input[type=radio][name$="-speech"]');
+  await b.page.getByRole("button", { name: "会議開始（録音開始）" }).click();
+  await b.page.waitForFunction(() => window.__recorder.capturing);
+  await sleep(14000);
+  const st = await b.page.evaluate(() => ({ queue: window.__recorder.queue.map((q) => q.meetingId), blocked: [...window.__recorder.blockedLocal.keys()] }));
+  const bTotal = contiguity(jobs(other)).total;
+  check("作れない会議は後回しになり、会議 B の録音は送られ続ける", bTotal > 0 && st.queue.every((m) => m < 0), `B=${bTotal}ms 待ち=${JSON.stringify(st.queue)} 後回し=${JSON.stringify(st.blocked)}`);
+  // B を一時停止すれば枠が空き、オフラインの会議も引き継がれる
+  await b.page.getByRole("button", { name: "一時停止" }).click();
+  const bound = await waitFor(async () => {
+    const list = await api(b.page, "/api/meetings?limit=50");
+    const m = (list.body?.meetings || []).find((x) => x.title === "作れないオフライン会議");
+    return m && contiguity(jobs(m.id)).total > 4000 ? m : null;
+  }, 70000, 2000);
+  if (!bound) log("  お知らせ: " + (await b.page.locator(".notices, [role=status], [role=alert]").allTextContents()).join(" | "));
+  check("枠が空くと、後回しにしたオフラインの会議も引き継いで送る", !!bound);
+  await b.browser.close().catch(() => {});
+  crash(b.proc);
+}
+
+async function scenarioCaptionNetwork() {
+  log("■ 音声認識が network エラーで切れても、つなぎ直して書き起こしを続ける");
+  const b = await launch(freshProfile("capnet"));
+  await login(b.page);
+  const id = await startMeeting(b.page, "音声認識の回線断の試験", "chrome");
+  await sleep(4000);
+  await b.page.evaluate(() => { window.__srNetworkDown = true; });
+  await sleep(6000);
+  const notice = await b.page.locator("text=再接続を続けています").count();
+  const during = await b.page.evaluate(() => window.__srCount || 0);
+  await b.page.evaluate(() => { window.__srNetworkDown = false; });
+  await sleep(12000);
+  const after = await b.page.evaluate(() => window.__srCount || 0);
+  check("切れている間、再接続中であることを目立つ警告で知らせる", notice > 0);
+  check("回線が戻ると書き起こしが再開する", after >= during + 4, `切断中まで ${during} 件 → 復帰後 ${after} 件`);
+  check("録音は止まらない", await b.page.evaluate(() => window.__recorder.capturing));
+  await b.page.getByRole("button", { name: "一時停止" }).click();
+  await b.browser.close().catch(() => {});
+  crash(b.proc);
+}
+
+async function scenarioCancelPause() {
+  log("■ 送れない間に一時停止 → 送信待ちのダイアログで「操作をやめる」→ 録音が続く");
+  const b = await launch(freshProfile("cancelpause"));
+  await login(b.page);
+  const id = await startMeeting(b.page, "一時停止の取りやめ試験");
+  await sleep(4000);
+  await b.context.route("**/api/meetings/*/audio", (route) => route.abort());
+  await sleep(5000);
+  await b.page.getByRole("button", { name: "一時停止" }).click();
+  await b.page.getByRole("button", { name: "操作をやめる" }).click({ timeout: 30000 });
+  const resumed = await waitFor(async () => (await b.page.evaluate(() => window.__recorder.capturing)) || null, 15000);
+  check("操作をやめると録音が自動で続く", !!resumed);
+  await b.context.unroute("**/api/meetings/*/audio");
+  await sleep(6000);
+  await b.page.getByRole("button", { name: "一時停止" }).click();
+  await waitFor(async () => (await b.page.evaluate(() => window.__recorder.queue.length === 0)) || null, 30000);
+  const c = contiguity(jobs(id));
+  check("やめる前後の録音が隙間なく並ぶ", c.gaps.length === 0 && c.total > 12000, `total=${c.total}ms gaps=${JSON.stringify(c.gaps)}`);
+  await b.browser.close().catch(() => {});
+  crash(b.proc);
+}
+
+async function scenarioTwoTabs() {
+  log("■ 同じ会議を別のタブで重ねて録音できない");
+  const b = await launch(freshProfile("twotabs"));
+  await login(b.page);
+  const id = await startMeeting(b.page, "2 つのタブの試験");
+  await sleep(3000);
+  const second = await b.context.newPage();
+  await second.goto(`${BASE}/#/m/${id}`);
+  await second.getByRole("button", { name: /録音を再開|再開/ }).first().click();
+  await sleep(2000);
+  const twice = await second.evaluate(() => window.__recorder.capturing);
+  const warned = await second.locator("text=別のタブ").count();
+  check("別のタブでは録音を始めず、理由を知らせる", !twice && warned > 0);
+  check("元のタブの録音は続く", await b.page.evaluate(() => window.__recorder.capturing));
+  await second.close();
+  await b.page.getByRole("button", { name: "一時停止" }).click();
+  await b.browser.close().catch(() => {});
+  crash(b.proc);
+}
+
+const all = { crashresume: scenarioCrashResume, blocked: scenarioBlocked, capnet: scenarioCaptionNetwork, cancelpause: scenarioCancelPause, twotabs: scenarioTwoTabs, timing: scenarioTiming, agenda: scenarioAgenda, crash: scenarioCrash, offlinestart: scenarioOfflineStart, offlinecrash: scenarioOfflineCrash, order: scenarioOrder, enhance: scenarioEnhance, offline: scenarioOffline, background: scenarioBackground, errors: scenarioServerErrors, apifail: scenarioApiFailure };
 const pick = process.argv.slice(2);
 for (const [name, run] of Object.entries(all)) {
   if (pick.length && !pick.includes(name)) continue;

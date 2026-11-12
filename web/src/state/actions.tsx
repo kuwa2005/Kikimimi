@@ -15,7 +15,10 @@ import {
   ensureAudio,
   haltCapture,
   parkQueue,
+  queuedFor,
   queueLength,
+  recordingElsewhere,
+  restoreDone,
   recorderState,
   recordingHere,
   resetAll,
@@ -62,13 +65,13 @@ export function missingKeyName(settings: Settings): string {
 }
 
 // 送り切れないときは、待つか、端末に残して先へ進むかを利用者に選んでもらう。録音は捨てない。
-export async function drainOrAsk(): Promise<boolean> {
-  while (!(await drainQueue())) {
+export async function drainOrAsk(meetingId?: number): Promise<boolean> {
+  while (!(await drainQueue(15000, meetingId))) {
     const choice = await openDialog({
       title: "録音の送信が終わりません",
       body: (
         <>
-          <p>未送信の録音が {queueLength()} 区間あります。ネットワークかサーバの状態を確認してください。</p>
+          <p>未送信の録音が {meetingId == null ? queueLength() : queuedFor(meetingId)} 区間あります。ネットワークかサーバの状態を確認してください。</p>
           <p className="muted">未送信の録音はこの端末に保存済みです。先へ進んでも消えず、つながり次第この会議の録音として取り込みます。</p>
         </>
       ),
@@ -78,7 +81,7 @@ export async function drainOrAsk(): Promise<boolean> {
     });
     if (!choice) return false;
     if (choice._choice === "park") {
-      parkQueue();
+      parkQueue(meetingId);
       return true;
     }
   }
@@ -182,11 +185,21 @@ export async function beginMeetingPaused(form: MeetingForm, existingId: number |
   notify("会議を開始しました（録音は一時停止中です）。録音するときは「再開」を押してください。", "info");
 }
 
+/** 送信待ちのダイアログで操作をやめたとき。録音を止めたままにせず、続きを録る。 */
+async function keepRecording(id: number) {
+  try {
+    await resumeMeeting(id);
+    notify("操作をやめたので、録音を続けています。", "info", "mic");
+  } catch (err) {
+    notify(`録音が止まっています。「再開」を押すと続きを録音します（${err instanceof Error ? err.message : String(err)}）`, "error", "mic");
+  }
+}
+
 export async function pauseMeeting(id: number) {
   if (recordingHere(id)) {
     // 一時停止中はマイクを離す。再開のときに取り直す。
     haltCapture();
-    if (!(await drainOrAsk())) return;
+    if (!(await drainOrAsk(id))) return keepRecording(id);
   }
   setDetail(await api<MeetingDetail>(`/api/meetings/${id}/pause`, { method: "POST" }));
 }
@@ -198,6 +211,12 @@ export async function resumeMeeting(id: number) {
   if (rec.capturing && rec.meetingId !== id) {
     throw new Error("別の会議を録音中です。そちらを一時停止か終了してから再開してください");
   }
+  // ほかのタブがこの会議を録音中なら、ここでは録らない（録音の位置が重なる）。
+  if (await recordingElsewhere(id)) {
+    throw new Error("この会議は別のタブ（またはウィンドウ）で録音中です。そちらで操作してください");
+  }
+  // ブラウザが落ちたあとの復元が終わってから、続きの位置を決める。
+  await restoreDone();
   useSavedTabPref();
   const open = currentDetail();
   if (open && open.meeting.id === id && (open.meeting.speech || "api") === "api") {
@@ -289,7 +308,7 @@ export async function finishMeeting(id: number, reason?: string) {
   }
   if (recordingHere(id)) {
     haltCapture();
-    if (!(await drainOrAsk())) return;
+    if (!(await drainOrAsk(id))) return keepRecording(id);
   }
   setDetail(await api<MeetingDetail>(`/api/meetings/${id}/finish`, { method: "POST", body: { close } }));
   const done =

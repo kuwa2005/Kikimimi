@@ -14,7 +14,9 @@ import {
   queuedFor,
   rebindLocal,
   recorderState,
+  recordingElsewhere,
   recordingHere,
+  restoreDone,
   resumeOffset,
   setLocalBinder,
   startCapturing,
@@ -110,6 +112,8 @@ export async function resumeLocal(localId: number) {
   if (!user) throw new Error("ログインしてください");
   const rec = recorderState.get();
   if (rec.capturing && rec.meetingId !== localId) throw new Error("別の会議を録音中です");
+  if (await recordingElsewhere(localId)) throw new Error("この会議は別のタブで録音中です");
+  await restoreDone();
   const m = await vault.getMeeting(localId).catch(() => undefined);
   await ensureAudio();
   startCapturing(localId, user.id, resumeOffset(localId, m?.seconds || 0));

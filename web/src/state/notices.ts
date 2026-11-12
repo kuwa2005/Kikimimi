@@ -7,7 +7,7 @@ export type Notice = { id: string; text: string; kind: NoticeKind; at: number };
 export const notices = createStore<Notice[]>([]);
 
 /** 録音と送信に関わるお知らせと、設定への案内（setup）。画面を移っても持ち越す。 */
-const STICKY = ["upload", "upload-drop", "mic", "tab", "limit", "auth", "setup", "vault", "net", "restore", "gap", "mic-silent", "battery", "storage", "enhance", "caption"];
+const STICKY = ["upload", "upload-drop", "mic", "tab", "limit", "auth", "setup", "vault", "net", "restore", "gap", "mic-silent", "battery", "storage", "enhance", "caption", "caption-net"];
 
 export function notify(text: string, kind: NoticeKind = "warn", key = "") {
   if (!text) return;

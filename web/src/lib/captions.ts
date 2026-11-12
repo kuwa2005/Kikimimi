@@ -3,6 +3,7 @@
 // 会議が Chrome の音声認識のときは、確定した文を保存する（setCaptionPersist）。
 // 既定は端末内の認識（processLocally）だけを使い、音声を端末の外に出さない。
 import { createStore } from "./store";
+import { clearNotice, notify } from "../state/notices";
 import { captionTrack, localSeconds, recorderState } from "../recorder/recorder";
 
 export type CaptionMode = "off" | "local" | "cloud";
@@ -86,6 +87,8 @@ let wanted = false;
 let restarts = 0;
 let fallbackNote = "";
 let preferTrack = false;
+/** 音声認識のサービスに続けてつながらなかった回数。再接続の間隔を広げるのに使う。 */
+let netFails = 0;
 
 /** 会議の文字起こしに使う Chrome の認識。端末内が使えるときはそれ、無いときは Chrome 標準の音声認識。 */
 export async function chromeCaptionMode(): Promise<CaptionMode> {
@@ -168,6 +171,13 @@ function start() {
   // 再生位置と 1 文ずれる。最初の途中結果が届いた時刻を発言の始まりとする。
   const startedAt = new Map<number, number>();
   rec.onresult = (event) => {
+    // 認識が戻った。再接続の数え直し。
+    if (netFails) {
+      netFails = 0;
+      clearNotice("caption-net");
+      setState({ problem: fallbackNote });
+    }
+    restarts = 0;
     let interim = "";
     const finals: CaptionLine[] = [];
     const now = localSeconds();
@@ -220,12 +230,19 @@ function start() {
       setTimeout(() => sync(), 300);
       return;
     }
+    if (event.error === "network") {
+      // 一時的な回線の問題。止めずに、間隔を空けながらつなぎ直す（onend で始め直す）。
+      netFails += 1;
+      const message = "音声認識のサービスに接続できません。再接続を続けています。録音は止まっていません（終了時に「録音から API で確定」も選べます）。";
+      setState({ problem: message });
+      if (netFails === 1) notify(message, "warn", "caption-net");
+      return;
+    }
     const reasons: Record<string, string> = {
       "language-not-supported": "この端末では日本語の音声認識が使えません",
       "not-allowed": "音声認識が許可されていません",
       "service-not-allowed": "音声認識が許可されていません",
       "audio-capture": "マイクを音声認識に渡せません",
-      network: "音声認識のサービスに接続できません",
     };
     setState({ problem: reasons[event.error] || `音声認識を止めました（${event.error}）` });
     if (reasons[event.error]) wanted = false;
@@ -236,6 +253,7 @@ function start() {
       restarts += 1;
       // 始め直すと結果の番号は 0 から振り直される。
       startedAt.clear();
+      const wait = netFails ? Math.min(1000 * 2 ** (netFails - 1), 15000) : 300;
       setTimeout(() => {
         if (wanted && recognition === rec) {
           try {
@@ -244,7 +262,7 @@ function start() {
             // 始め直せなければ次の録音開始まで待つ
           }
         }
-      }, 300);
+      }, wait);
     } else if (recognition === rec) {
       setState({ running: false, interim: "", problem: fallbackNote });
     }
