@@ -487,6 +487,7 @@ async function scenarioOfflineStart() {
   check("オフラインでも画面が開き、ログイン中として動く", badge);
   check("オフラインのまま会議を始めて録音できる", true);
   await sleep(18000);
+  if (process.env.E2E_SHOTS) await b.page.screenshot({ path: path.join(process.env.E2E_SHOTS, "offline-meeting.png") });
   const before = await localMs(b.page);
   const counts = await vaultCounts(b.page);
   check("オフライン中の録音・字幕・会議は端末に保存される", counts.chunks >= 1 && counts.meetings === 1 && counts.captions >= 1, JSON.stringify(counts));
