@@ -9,7 +9,7 @@ pub const DEFAULT_MODEL: &str = "gemini-3.8-flash";
 /// 一時エラーで同じ区間を Gemini に送る回数の上限。打ち切りと再開で同じ値を使う。
 pub const MAX_ATTEMPTS: i64 = 5;
 
-const LATEST_VERSION: i64 = 14;
+const LATEST_VERSION: i64 = 15;
 
 /// 版 7 より前の既定の要約プロンプト。変えていない会員は、移行で新しい既定に置き換える。
 const OLD_SUMMARY_PROMPT_V6: &str = "\
@@ -154,6 +154,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             12 => migrate_v12(&tx)?,
             13 => migrate_v13(&tx)?,
             14 => migrate_v14(&tx)?,
+            15 => migrate_v15(&tx)?,
             _ => anyhow::bail!("不明なスキーマ版 {next}"),
         }
         tx.execute("UPDATE schema_version SET version=?1", [next])?;
@@ -545,6 +546,31 @@ fn migrate_v13(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// 版 15: 会議の番号を使い回さない。削除した会議の番号が次の会議に付くと、
+/// 前の持ち主が開いたままの画面（リアルタイム配信）に、別の人の会議が流れるおそれがある。
+fn migrate_v15(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS id_watermark (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+         INSERT OR IGNORE INTO id_watermark (name, value) SELECT 'meetings', COALESCE(MAX(id), 0) FROM meetings;",
+    )?;
+    Ok(())
+}
+
+/// 次の会議の番号。これまでに使った最大の番号（削除済みも含む）より大きくする。
+fn next_meeting_id(conn: &Connection) -> Result<i64> {
+    let used: i64 = conn.query_row(
+        "SELECT MAX(COALESCE((SELECT value FROM id_watermark WHERE name='meetings'), 0), COALESCE((SELECT MAX(id) FROM meetings), 0))",
+        [],
+        |r| r.get(0),
+    )?;
+    let next = used + 1;
+    conn.execute(
+        "INSERT INTO id_watermark (name, value) VALUES ('meetings', ?1) ON CONFLICT(name) DO UPDATE SET value=excluded.value",
+        [next],
+    )?;
+    Ok(next)
+}
+
 /// 版 14: Chrome の速報字幕の控え。API で文字起こしする会議でも速報を残し、
 /// API の文字起こしが打ち切りになった区間を、要約の前にこの控えで埋める。
 fn migrate_v14(conn: &Connection) -> Result<()> {
@@ -818,7 +844,8 @@ fn create_fresh(conn: &Connection) -> Result<()> {
     migrate_v11(conn)?;
     migrate_v12(conn)?;
     migrate_v13(conn)?;
-    migrate_v14(conn)
+    migrate_v14(conn)?;
+    migrate_v15(conn)
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -1471,11 +1498,11 @@ pub fn create_meeting(
         [user_id],
         |r| r.get(0),
     )?;
+    let id = next_meeting_id(&tx)?;
     tx.execute(
-        "INSERT INTO meetings (user_id, title, status, created_at, position) VALUES (?1, ?2, 'draft', ?3, ?4)",
-        params![user_id, title, now_stamp(), top],
+        "INSERT INTO meetings (id, user_id, title, status, created_at, position) VALUES (?1, ?2, ?3, 'draft', ?4, ?5)",
+        params![id, user_id, title, now_stamp(), top],
     )?;
-    let id = tx.last_insert_rowid();
     insert_questions(&tx, id, questions)?;
     tx.commit()?;
     Ok(id)
@@ -3601,6 +3628,15 @@ mod tests {
         assert_eq!(count_error_jobs(&conn, id).unwrap(), 1);
         // 打ち切った区間は、起動時の再武装の対象にならない
         assert!(list_failed_jobs(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleted_meeting_id_is_never_reused() {
+        let mut conn = memory();
+        let first = live_meeting(&mut conn);
+        assert!(delete_meeting(&conn, first).unwrap());
+        let second = live_meeting(&mut conn);
+        assert!(second > first, "削除した会議の番号 {first} を使い回した（{second}）");
     }
 
     #[test]

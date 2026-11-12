@@ -905,11 +905,10 @@ fn new_title(title: &str) -> String {
 
 fn check_fess_url(url: &str) -> Result<(), String> {
     let url = url.trim();
-    if url.is_empty() || url.starts_with("http://") || url.starts_with("https://") {
-        Ok(())
-    } else {
-        Err("FESS の URL は http:// か https:// で始めてください".into())
+    if url.is_empty() {
+        return Ok(());
     }
+    knowledge::fess_allowed(url)
 }
 
 // ---- 設定 ----
@@ -1237,6 +1236,7 @@ async fn remove_meeting(
         let _ = tokio::fs::remove_dir_all(&docs).await;
     }
     state.publish(id, json!({"type":"deleted"})).await;
+    state.close_events(id).await;
     Ok(Json(json!({"deleted": true})))
 }
 
@@ -1930,6 +1930,11 @@ async fn post_audio(
                     .publish(id, json!({"type":"limit","limit": limit.0, "reached": true}))
                     .await;
                 return Err(limit_error(limit));
+            }
+            // DB やディスクの一時的な失敗は 500（画面は送り直す）。409 は「会議が受け付けない」ときだけ。
+            // 409 を返すと画面は録音を止めるので、取り違えると会議の残りが録音されない。
+            if err.chain().any(|cause| cause.is::<rusqlite::Error>() || cause.is::<std::io::Error>()) {
+                return Err(internal(err));
             }
             return Err(AppError::new(StatusCode::CONFLICT, err.to_string()));
         }

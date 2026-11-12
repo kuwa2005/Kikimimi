@@ -205,6 +205,11 @@ impl AppState {
         }
     }
 
+    /// 会議を削除したら配信を閉じ、開いたままの画面との接続を切る。
+    pub async fn close_events(&self, meeting_id: i64) {
+        self.inner.events.lock().await.remove(&meeting_id);
+    }
+
     pub async fn subscribe(&self, meeting_id: i64) -> broadcast::Receiver<String> {
         let mut map = self.inner.events.lock().await;
         let tx = map

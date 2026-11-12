@@ -626,7 +626,7 @@ async fn legacy_data_is_hidden_until_assigned() {
     call(&state, &alice, "PUT", "/api/settings", json!({"provider": "openai", "openai_api_key": "sk-mine", "summary_prompt": "私のプロンプト"})).await;
     {
         let conn = state.db().lock().await;
-        let user = accounts::user_id_by_login(&conn, "alice").unwrap().unwrap();
+        let user = accounts::user_id_by_login(&conn, &test_email("alice")).unwrap().unwrap();
         db::assign_legacy(&conn, user, state.data_dir()).unwrap();
         // 二度実行しても変わらない。
         db::assign_legacy(&conn, user, state.data_dir()).unwrap();

@@ -1,6 +1,51 @@
 use serde_json::Value;
+use std::sync::OnceLock;
 
 use super::HitDraft;
+
+/// FESS へ接続してよいかを確かめる。会員が入れた URL にサーバから接続するので、
+/// 運用者が `KIKIMIMI_FESS_HOSTS`（カンマ区切りのホスト名、または ホスト名:ポート）で許可した宛先だけにする。
+/// 許可が無いと、社内の管理画面やクラウドの管理用アドレスへサーバから接続させられる（SSRF）。
+pub fn fess_allowed(base: &str) -> Result<(), String> {
+    let allowed = std::env::var("KIKIMIMI_FESS_HOSTS").unwrap_or_default();
+    allowed_by(base, &allowed)
+}
+
+fn allowed_by(base: &str, allowed: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(base.trim()).map_err(|_| "FESS の URL を読めません".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("FESS の URL は http:// か https:// で始めてください".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("FESS の URL に利用者名やパスワードは入れられません。トークン欄を使ってください".into());
+    }
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    let with_port = url.port_or_known_default().map(|port| format!("{host}:{port}")).unwrap_or_default();
+    let list: Vec<String> = allowed
+        .split(',')
+        .map(|item| item.trim().to_ascii_lowercase())
+        .filter(|item| !item.is_empty())
+        .collect();
+    if list.is_empty() {
+        return Err("このサーバでは FESS の接続先が許可されていません。運用者に KIKIMIMI_FESS_HOSTS の設定を依頼してください".into());
+    }
+    if list.iter().any(|item| *item == host || *item == with_port) {
+        Ok(())
+    } else {
+        Err(format!("FESS の接続先 {host} は許可されていません（許可は運用者が KIKIMIMI_FESS_HOSTS で設定します）"))
+    }
+}
+
+/// FESS 用の接続。リダイレクトはたどらない（許可した宛先から別の宛先へ飛ばされないように）。
+fn fess_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("FESS 用の接続を作れません")
+    })
+}
 
 pub async fn search_fess(
     http: &reqwest::Client,
@@ -43,8 +88,10 @@ async fn search_one(
     token: &str,
     query: &str,
 ) -> Result<Vec<HitDraft>, String> {
+    let _ = http;
+    fess_allowed(base)?;
     let url = format!("{}/api/v2/search", base.trim_end_matches('/'));
-    let mut request = http
+    let mut request = fess_client()
         .get(url)
         .query(&[("q", query), ("num", "5")])
         .timeout(std::time::Duration::from_secs(4));
@@ -55,7 +102,8 @@ async fn search_one(
     let status = response.status();
     let body = response.text().await.map_err(|err| err.to_string())?;
     if !status.is_success() {
-        return Err(format!("{status} {}", clip(&body)));
+        // 相手の応答本文は返さない（許可外の情報を画面に出さない）。
+        return Err(format!("FESS が {status} を返しました"));
     }
     parse_fess_search(&body, query)
 }
@@ -97,9 +145,7 @@ pub fn parse_fess_search(body: &str, query: &str) -> Result<Vec<HitDraft>, Strin
 
 /// 接続テスト。1 件だけ検索して、応答の形まで確かめる。
 pub async fn check_fess(http: &reqwest::Client, base: &str, token: &str) -> Result<String, String> {
-    if !(base.starts_with("http://") || base.starts_with("https://")) {
-        return Err("URL は http:// か https:// で始めてください".into());
-    }
+    fess_allowed(base)?;
     let hits = search_one(http, base, token, "test").await?;
     Ok(format!("FESS に接続できました（試しの検索で {} 件）", hits.len()))
 }
@@ -182,10 +228,30 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
+        // 運用者が許可した宛先にだけ接続する（試験では模擬の FESS を許可する）。
+        std::env::set_var("KIKIMIMI_FESS_HOSTS", "127.0.0.1");
         let http = reqwest::Client::new();
         let hits = search_fess(&http, &format!("http://{addr}"), "", &["発注".into()])
             .await
             .unwrap();
         assert_eq!(hits[0].locator, "http://fess.local/a");
+    }
+}
+
+#[cfg(test)]
+mod allow_tests {
+    use super::allowed_by;
+
+    #[test]
+    fn only_operator_listed_hosts_are_reachable() {
+        let list = "fess.example.local, 172.31.0.20:8080";
+        assert!(allowed_by("http://fess.example.local:8080", list).is_ok());
+        assert!(allowed_by("http://172.31.0.20:8080/", list).is_ok());
+        assert!(allowed_by("http://172.31.0.20:9200/", list).is_err(), "許可していないポート");
+        assert!(allowed_by("http://169.254.169.254/latest/meta-data", list).is_err());
+        assert!(allowed_by("http://127.0.0.1:8765", list).is_err());
+        assert!(allowed_by("http://user:pw@fess.example.local", list).is_err());
+        assert!(allowed_by("file:///etc/passwd", list).is_err());
+        assert!(allowed_by("http://fess.example.local", "").is_err(), "許可が無ければどこにも接続しない");
     }
 }

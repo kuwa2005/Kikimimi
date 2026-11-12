@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::state::AppState;
 
-pub use fess::check_fess;
+pub use fess::{check_fess, fess_allowed};
 use fess::search_fess;
 use local::search_local;
 pub use local::{chunk_text, commit_index, make_snippet, prepare_many, read_text};
