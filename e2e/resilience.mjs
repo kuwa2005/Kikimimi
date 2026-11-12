@@ -46,12 +46,29 @@ const FAKE_SR = `(() => {
     constructor() { this.onresult = null; this.onerror = null; this.onend = null; this._t = null; }
     start() {
       if (this._t) return;
+      // 本物の Chrome と同じく、話し始めに途中結果、話し終えてから確定が届く（750ms おきに交互）。
+      let pending = null;
+      let index = 0;
       this._t = setInterval(() => {
-        const n = (window.__srCount = (window.__srCount || 0) + 1);
-        // 試験が台本（window.__srLines）を渡していれば、その順に話したことにする。
-        const text = (window.__srLines && window.__srLines.shift()) || "速報" + n;
-        this.onresult && this.onresult({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: text } }] });
-      }, 1500);
+        if (!pending) {
+          const n = (window.__srSeq = (window.__srSeq || 0) + 1);
+          // 試験が台本（window.__srLines）を渡していれば、その順に話したことにする。
+          const text = (window.__srLines && window.__srLines.shift()) || "速報" + n;
+          pending = text;
+          const r = window.__recorder;
+          (window.__srMarks = window.__srMarks || []).push({ text, at: r ? (r.sentSamples + r.buffered * (16000 / r.sampleRate)) / 16000 : 0 });
+          const results = [];
+          results[index] = { isFinal: false, 0: { transcript: text.slice(0, 2) } };
+          this.onresult && this.onresult({ resultIndex: index, results });
+        } else {
+          window.__srCount = (window.__srCount || 0) + 1;
+          const results = [];
+          results[index] = { isFinal: true, 0: { transcript: pending } };
+          this.onresult && this.onresult({ resultIndex: index, results });
+          index += 1;
+          pending = null;
+        }
+      }, 750);
     }
     stop() { clearInterval(this._t); this._t = null; this.onend && this.onend(); }
     abort() { clearInterval(this._t); this._t = null; }
@@ -677,7 +694,51 @@ async function scenarioAgenda() {
   crash(b.proc);
 }
 
-const all = { agenda: scenarioAgenda, crash: scenarioCrash, offlinestart: scenarioOfflineStart, offlinecrash: scenarioOfflineCrash, order: scenarioOrder, enhance: scenarioEnhance, offline: scenarioOffline, background: scenarioBackground, errors: scenarioServerErrors, apifail: scenarioApiFailure };
+async function scenarioTiming() {
+  log("■ Chrome の書き起こしの時刻が発言の始まりに合い、再生中の行の表示がずれない");
+  const b = await launch(freshProfile("timing"));
+  await login(b.page);
+  const id = await startMeeting(b.page, "再生位置の試験", "chrome");
+  await sleep(16000);
+  await b.page.getByRole("button", { name: "一時停止" }).click();
+  await waitFor(async () => (await b.page.evaluate(() => window.__recorder.captionQueue.length === 0)) || null, 15000);
+  const marks = await b.page.evaluate(() => window.__srMarks || []);
+  const segs = segments(id);
+  const diffs = segs.map(([at, text]) => {
+    const mark = marks.find((m) => m.text === text);
+    return mark ? at - mark.at : null;
+  }).filter((d) => d != null);
+  const worst = Math.max(...diffs.map((d) => Math.abs(d)));
+  log(`  発言の始まりとの差（秒）: ${diffs.map((d) => d.toFixed(2)).join(", ")}`);
+  check("書き起こしの時刻が発言の始まりに合う（0.6 秒以内）", diffs.length >= 5 && worst <= 0.6, `最大 ${worst.toFixed(2)} 秒`);
+  // 終了して、全文書き起こしの再生で水色の行を確かめる
+  await api(b.page, `/api/meetings/${id}/finish`, { method: "POST", body: JSON.stringify({ close: "plain" }) });
+  await waitFor(async () => ((await api(b.page, `/api/meetings/${id}`)).body?.meeting?.status === "done") || null, 30000);
+  await b.page.goto(`${BASE}/#/m/${id}`);
+  await b.page.reload();
+  const tab = b.page.getByRole("tab", { name: /書き起こし/ });
+  await tab.first().click();
+  await b.page.waitForSelector(".seg[data-start]");
+  let ok = 0;
+  const tried = [];
+  for (const k of [2, 4, 6]) {
+    if (k >= segs.length) continue;
+    const [start, text] = segs[k];
+    const mark = marks.find((m) => m.text === text);
+    // 発言の途中（話し始めから 0.4 秒後）を再生する
+    await b.page.evaluate((t) => { const a = document.getElementById("player"); a.currentTime = t; return a.play(); }, mark.at + 0.4);
+    await sleep(300);
+    const shown = await b.page.locator(".seg.playing .seg-text").first().textContent().catch(() => null);
+    tried.push(`${text}→${shown}`);
+    if (shown === text) ok += 1;
+    await b.page.evaluate(() => document.getElementById("player").pause());
+  }
+  check("再生中の水色の行が、いま聞こえている発言と一致する", ok === tried.length && ok > 0, tried.join(" / "));
+  await b.browser.close().catch(() => {});
+  crash(b.proc);
+}
+
+const all = { timing: scenarioTiming, agenda: scenarioAgenda, crash: scenarioCrash, offlinestart: scenarioOfflineStart, offlinecrash: scenarioOfflineCrash, order: scenarioOrder, enhance: scenarioEnhance, offline: scenarioOffline, background: scenarioBackground, errors: scenarioServerErrors, apifail: scenarioApiFailure };
 const pick = process.argv.slice(2);
 for (const [name, run] of Object.entries(all)) {
   if (pick.length && !pick.includes(name)) continue;

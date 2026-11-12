@@ -51,6 +51,10 @@ function recognitionClass(): RecognitionClass | null {
 }
 
 const LANG = "ja-JP";
+/** 話し始めてから最初の途中結果が届くまでの遅れ（秒）の目安。 */
+const SPEECH_LEAD = 0.5;
+/** 途中結果が無かったときに、文の長さから話し始めを見積もる（日本語 1 文字あたりの秒数）。 */
+const SEC_PER_CHAR = 0.15;
 
 /** この端末で使えるか。"available" / "downloadable" / "downloading" / "unavailable" / "unsupported"。 */
 export async function captionAvailability(mode: CaptionMode): Promise<string> {
@@ -160,15 +164,22 @@ function start() {
       // 使えなければ付けない
     }
   }
+  // 発言の始まりの時刻（結果の番号ごと）。確定は話し終えてから届くので、確定の時刻を使うと
+  // 再生位置と 1 文ずれる。最初の途中結果が届いた時刻を発言の始まりとする。
+  const startedAt = new Map<number, number>();
   rec.onresult = (event) => {
     let interim = "";
     const finals: CaptionLine[] = [];
+    const now = localSeconds();
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const result = event.results[i];
       const text = result[0].transcript.trim();
       if (!text) continue;
+      if (!startedAt.has(i)) startedAt.set(i, Math.max(0, now - SPEECH_LEAD));
       if (result.isFinal) {
-        let at = localSeconds();
+        // 途中結果を見ずに確定が届いたときは、文の長さから話し始めを見積もる。
+        let at = startedAt.get(i) ?? now;
+        if (at >= now - 0.01) at = Math.max(0, now - Math.min(text.length * SEC_PER_CHAR, 10));
         if (at <= lastAt + 0.2) at = lastAt + 0.25;
         lastAt = at;
         finals.push({ chunkStart: at, text });
@@ -223,6 +234,8 @@ function start() {
     // 連続認識は途中で終わることがあるので、録音中なら始め直す（回数に上限）。
     if (wanted && recognition === rec && recorderState.get().capturing && restarts < 500) {
       restarts += 1;
+      // 始め直すと結果の番号は 0 から振り直される。
+      startedAt.clear();
       setTimeout(() => {
         if (wanted && recognition === rec) {
           try {
