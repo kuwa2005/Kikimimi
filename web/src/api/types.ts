@@ -90,8 +90,8 @@ export type Meeting = {
   speech?: "api" | "chrome" | "off";
   /** API の文字起こしを、文字だけにする。 */
   transcript_only?: boolean;
-  /** 終了のしかた。"" / "api" / "chrome" / "plain"。 */
-  finish_close?: "" | "api" | "chrome" | "plain";
+  /** 終了のしかた。"" / "api" / "chrome" / "plain" / "redo"（録音から API で確定し直す・サーバ内部）。 */
+  finish_close?: "" | "api" | "chrome" | "plain" | "redo";
 };
 
 export type Evidence = { segment_id: number; start_sec: number; quote: string };
@@ -167,6 +167,7 @@ export type SseEvent =
   | { type: "hello" }
   | { type: "resync" }
   | { type: "segment"; segment: Segment; edited?: boolean }
+  | { type: "segments_replaced"; removed: number[]; segment: Segment | null }
   | { type: "questions"; questions: Question[]; active_question_id: number | null }
   | { type: "knowledge"; hits: Hit[] }
   | { type: "notes"; notes: Note[] }

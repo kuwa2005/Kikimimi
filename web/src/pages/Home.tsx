@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { localHash, localMeetings } from "../state/offline";
 import { session as sessionStore } from "../state/session";
 import { useStore as useLocalStore } from "../lib/store";
 import { api, errorMessage, request } from "../api/client";
 import type { Folder, Meeting, MeetingList, Settings } from "../api/types";
 import { fmt, fmtLocal, statusLabel } from "../lib/format";
-import { deleteMeeting, keyReady } from "../state/actions";
+import { deleteMeeting, keyReady, quickStart } from "../state/actions";
 import { confirmDialog, openDialog } from "../state/dialog";
 import { homeFolderFilter, setHomeFolder } from "../state/draft";
 import { notify } from "../state/notices";
@@ -144,11 +144,42 @@ export function Home() {
   const [dropTarget, setDropTarget] = useState<number | null>(null);
   const [folderDrop, setFolderDrop] = useState<string | null>(null);
 
+  const [starting, setStarting] = useState(false);
+
   const setFolder = (value: string) => {
     setFolderState(value);
     setHomeFolder(value);
   };
   const refresh = () => setReload((value) => value + 1);
+
+  // ワンタップで即録音（モバイルのショートカット）。二度押しは無視する。
+  const quick = () => {
+    if (starting) return;
+    setStarting(true);
+    void quickStart()
+      .catch((err) => notify(errorMessage(err), "error"))
+      .finally(() => setStarting(false));
+  };
+
+  // PWA の「すぐ録音」ショートカット（start_url の ?quick=1）で開いたら、一度だけ録音を始める。
+  // 自動開始は、ホーム画面に追加したアプリ（standalone）から開いたときだけにする。外部リンクの
+  // `?quick=1` では自動で録音を始めない（意図しない録音と、Free の会議数の消費を防ぐ）。クエリは消し、
+  // standalone でなくてもボタンは使える。
+  const quickFired = useRef(false);
+  useEffect(() => {
+    if (quickFired.current) return;
+    const params = new URLSearchParams(location.search);
+    if (params.get("quick") !== "1") return;
+    quickFired.current = true;
+    // 再読み込みで二重に始めないよう、クエリを消す。
+    params.delete("quick");
+    const search = params.toString();
+    history.replaceState(null, "", location.pathname + (search ? `?${search}` : "") + location.hash);
+    const installed =
+      window.matchMedia?.("(display-mode: standalone)").matches ||
+      (navigator as Navigator & { standalone?: boolean }).standalone === true;
+    if (installed) quick();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const onHome = () => refresh();
@@ -307,9 +338,15 @@ export function Home() {
             </p>
           ) : null}
         </div>
-        <a className="btn primary big" href="#/new">
-          ＋ 新しい会議{current ? `（${current.name}）` : ""}
-        </a>
+        <div className="home-start">
+          <button type="button" className="btn primary big rec-start" disabled={starting} onClick={quick} title="会議を作って、その場で録音を始めます（あとで編集できます）">
+            <span className="dot" aria-hidden="true" />
+            {starting ? "開始しています…" : "すぐ録音を開始"}
+          </button>
+          <a className="btn big" href="#/new">
+            ＋ 新しい会議{current ? `（${current.name}）` : ""}
+          </a>
+        </div>
       </header>
       <Notices />
       <LocalMeetings />
@@ -327,9 +364,15 @@ export function Home() {
             <li>マイクを選んで「会議を開始」を押します。</li>
             <li>話すと書き起こし・回答候補・次に聞くと良い問いかけ・メモが出て、終了すると議事録ができます。</li>
           </ol>
-          <a className="btn primary big" href="#/new">
-            ＋ 最初の会議を作成
-          </a>
+          <div className="home-start">
+            <button type="button" className="btn primary big rec-start" disabled={starting} onClick={quick}>
+              <span className="dot" aria-hidden="true" />
+              {starting ? "開始しています…" : "すぐ録音を開始"}
+            </button>
+            <a className="btn big" href="#/new">
+              ＋ アジェンダを決めて始める
+            </a>
+          </div>
         </section>
       ) : (
         <>
@@ -411,6 +454,10 @@ export function Home() {
           </section>
         </>
       )}
+      <button type="button" className="quick-fab" disabled={starting} onClick={quick} aria-label="すぐに録音を開始">
+        <span className="dot" aria-hidden="true" />
+        <span>すぐ録音</span>
+      </button>
     </div>
   );
 }

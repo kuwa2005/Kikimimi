@@ -53,7 +53,8 @@ function enter(response: AuthResponse) {
 
 export async function bootstrap() {
   try {
-    enter(await api<AuthResponse>("/api/auth/me"));
+    // つながっているのに応答が無い回線で起動が止まらないよう、4 秒で諦めてオフライン起動に切り替える。
+    enter(await api<AuthResponse>("/api/auth/me", { timeoutMs: 4000 }));
   } catch (err) {
     const user = lastUser();
     if (isNetworkError(err) && user) {

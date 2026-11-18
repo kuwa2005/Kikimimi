@@ -9,7 +9,7 @@ pub const DEFAULT_MODEL: &str = "gemini-3.8-flash";
 /// 一時エラーで同じ区間を Gemini に送る回数の上限。打ち切りと再開で同じ値を使う。
 pub const MAX_ATTEMPTS: i64 = 5;
 
-const LATEST_VERSION: i64 = 15;
+const LATEST_VERSION: i64 = 16;
 
 /// 版 7 より前の既定の要約プロンプト。変えていない会員は、移行で新しい既定に置き換える。
 const OLD_SUMMARY_PROMPT_V6: &str = "\
@@ -155,6 +155,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             13 => migrate_v13(&tx)?,
             14 => migrate_v14(&tx)?,
             15 => migrate_v15(&tx)?,
+            16 => migrate_v16(&tx)?,
             _ => anyhow::bail!("不明なスキーマ版 {next}"),
         }
         tx.execute("UPDATE schema_version SET version=?1", [next])?;
@@ -587,6 +588,28 @@ fn migrate_v14(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// 版 16: 終了後に録音を API で文字起こし直す（#8）ための印。
+/// - `segments.source`: その行の出どころ（'chrome' 速報 / 'api' 確定 / 'backup' 控え / 'import' 取り込み / '' 移行前）。
+///   置き換えの対象は 'chrome' だけにして、移行前の古い会議は触らない（安全側）。
+/// - `segments.text_manual`: 人が本文を直した行。API の確定で置き換えない（D4）。
+/// - `meeting_gaps`: 録音が途切れた箇所（画面ロック・省電力）。議事録に空白として残す（P5）。
+fn migrate_v16(conn: &Connection) -> Result<()> {
+    add_column(conn, "segments", "source", "TEXT NOT NULL DEFAULT ''")?;
+    add_column(conn, "segments", "text_manual", "INTEGER NOT NULL DEFAULT 0")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS meeting_gaps (
+           id INTEGER PRIMARY KEY,
+           meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+           at_sec REAL NOT NULL,
+           lost_sec REAL NOT NULL,
+           reason TEXT NOT NULL DEFAULT '',
+           created_at TEXT NOT NULL
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS meeting_gaps_at ON meeting_gaps(meeting_id, at_sec);",
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MeetingDoc {
     pub id: i64,
@@ -845,7 +868,8 @@ fn create_fresh(conn: &Connection) -> Result<()> {
     migrate_v12(conn)?;
     migrate_v13(conn)?;
     migrate_v14(conn)?;
-    migrate_v15(conn)
+    migrate_v15(conn)?;
+    migrate_v16(conn)
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -2263,8 +2287,9 @@ pub fn update_segment(
     text: &str,
     speaker: Option<&str>,
 ) -> Result<Segment> {
+    // 人が本文を直した行。以後 API の確定で置き換えない（#8 D4）。
     let n = conn.execute(
-        "UPDATE segments SET text=?1 WHERE id=?2 AND meeting_id=?3",
+        "UPDATE segments SET text=?1, text_manual=1 WHERE id=?2 AND meeting_id=?3",
         params![text, segment_id, meeting_id],
     )?;
     if n == 0 {
@@ -2549,12 +2574,26 @@ pub fn prepare_finish(conn: &Connection, meeting_id: i64, close: &str) -> Result
         "" | "api" | "chrome" | "plain" => close,
         _ => anyhow::bail!("終了のしかたが正しくありません"),
     };
-    if close == "api" {
+    let stored: &str = if close == "api" {
         promote_held(conn, meeting_id)?;
-    }
+        // Chrome・録音だけの会議を API で確定し直すときは、区間ごとに置き換える印（redo）を立てる。
+        // 速報字幕を控えへ退避し、API の 1 行に置き換えるため（二重化を防ぐ）。
+        // 録音中から API の会議は、速報字幕が無いので従来どおり 'api'。
+        let speech: String = conn
+            .query_row("SELECT speech FROM meetings WHERE id=?1", [meeting_id], |r| r.get(0))
+            .optional()?
+            .context("会議がありません")?;
+        if speech == "chrome" || speech == "off" {
+            "redo"
+        } else {
+            "api"
+        }
+    } else {
+        close
+    };
     conn.execute(
         "UPDATE meetings SET finish_close=?1 WHERE id=?2",
-        params![close, meeting_id],
+        params![stored, meeting_id],
     )?;
     request_finish(conn, meeting_id)
 }
@@ -2580,8 +2619,20 @@ pub fn cancel_finish(conn: &Connection, meeting_id: i64) -> Result<()> {
     if !finish || (status != "live" && status != "paused") {
         anyhow::bail!("要約に取りかかったため、録音には戻せません");
     }
+    // redo（終了時の API 確定）で文字起こし待ちに上げた区間を、保留に戻す（P3）。
+    // 録音に戻ったあと、録音中の区間に API の行が混ざり続けるのを防ぐ。
+    let speech: String = conn
+        .query_row("SELECT speech FROM meetings WHERE id=?1", [meeting_id], |r| r.get(0))
+        .optional()?
+        .unwrap_or_default();
+    if speech == "chrome" || speech == "off" {
+        conn.execute(
+            "UPDATE audio_jobs SET status='held' WHERE meeting_id=?1 AND status='pending'",
+            [meeting_id],
+        )?;
+    }
     conn.execute(
-        "UPDATE meetings SET finish_requested=0, status='paused' WHERE id=?1",
+        "UPDATE meetings SET finish_requested=0, status='paused', finish_close='' WHERE id=?1",
         [meeting_id],
     )?;
     Ok(())
@@ -2740,6 +2791,14 @@ fn enqueue(
     )?;
     tx.commit()?;
     Ok((id, true))
+}
+
+/// 区間の長さ（ミリ秒）。記録が無い古い行は 0。
+pub fn audio_duration_ms(conn: &Connection, job_id: i64) -> Result<i64> {
+    Ok(conn
+        .query_row("SELECT duration_ms FROM audio_jobs WHERE id=?1", [job_id], |r| r.get(0))
+        .optional()?
+        .unwrap_or(0))
 }
 
 pub fn claim_pending(conn: &mut Connection) -> Result<Option<AudioJob>> {
@@ -3041,11 +3100,11 @@ pub fn set_auto_speakers(conn: &Connection, meeting_id: i64, speakers: &[(i64, S
 /// - API で文字起こしする会議: 控え（caption_backup）にだけ残す。API が打ち切りになった区間の穴埋めに使う。
 /// - 録音だけの会議: 控えに残す（あとで API に切り替えて失敗しても、何も無いよりよい）。
 pub fn save_caption(conn: &Connection, meeting_id: i64, start_sec: f64, text: &str) -> Result<Option<Segment>> {
-    let (status, speech): (String, String) = conn
+    let (status, speech, finish_close): (String, String, String) = conn
         .query_row(
-            "SELECT status, speech FROM meetings WHERE id=?1",
+            "SELECT status, speech, finish_close FROM meetings WHERE id=?1",
             [meeting_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?
         .context("会議がありません")?;
@@ -3059,7 +3118,10 @@ pub fn save_caption(conn: &Connection, meeting_id: i64, start_sec: f64, text: &s
     if !start_sec.is_finite() || start_sec < 0.0 || start_sec > 86_400.0 * 12.0 {
         anyhow::bail!("書き起こしの時刻が正しくありません");
     }
-    if speech != "chrome" {
+    // API で文字起こしする会議・録音だけの会議は控えに残す。
+    // Chrome の会議でも「終了後に API で確定し直す（redo）」を選んだあとは、遅れて届いた速報が
+    // API の確定文と二重にならないよう、控えにだけ入れる（API 側が本文になる）。
+    if speech != "chrome" || finish_close == "redo" {
         conn.execute(
             "INSERT OR IGNORE INTO caption_backup (meeting_id, start_sec, text, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![meeting_id, start_sec, text, now_stamp()],
@@ -3069,19 +3131,30 @@ pub fn save_caption(conn: &Connection, meeting_id: i64, start_sec: f64, text: &s
     if segment_exists(conn, meeting_id, start_sec)? {
         return Ok(None);
     }
-    let id = insert_segment(conn, meeting_id, start_sec, &text)?;
+    let id = insert_segment_src(conn, meeting_id, start_sec, &text, "chrome")?;
     Ok(Some(Segment { id, start_sec, text, ..Default::default() }))
 }
 
 /// 文字起こしが打ち切りになった区間（status='error' で再試行の予定が無いもの）に、
 /// 速報字幕の控えを書き起こしとして入れる。入れた区間の数を返す。何度呼んでも同じ結果になる。
 pub fn fill_gaps_from_backup(conn: &Connection, meeting_id: i64) -> Result<i64> {
+    let speech: String = conn
+        .query_row("SELECT speech FROM meetings WHERE id=?1", [meeting_id], |r| r.get(0))
+        .optional()?
+        .unwrap_or_default();
+    // 打ち切り（error）の区間は常に控えで埋める。録音だけ（off）の会議は、文字起こし用のキーが
+    // 無く保留（held）のままの区間も控えで埋める（P4。キーが無くても字幕が議事録に残るように）。
     let gaps: Vec<(i64, i64)> = {
-        let mut stmt = conn.prepare(
+        let sql = if speech == "off" {
+            "SELECT start_ms, duration_ms FROM audio_jobs
+             WHERE meeting_id=?1 AND status IN ('error','held') AND silent=0
+             ORDER BY start_ms"
+        } else {
             "SELECT start_ms, duration_ms FROM audio_jobs
              WHERE meeting_id=?1 AND status='error' AND next_retry_at IS NULL AND silent=0
-             ORDER BY start_ms",
-        )?;
+             ORDER BY start_ms"
+        };
+        let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map([meeting_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
@@ -3101,7 +3174,7 @@ pub fn fill_gaps_from_backup(conn: &Connection, meeting_id: i64) -> Result<i64> 
         let mut used = false;
         for (at, text) in lines {
             if !segment_exists(conn, meeting_id, at)? {
-                insert_segment(conn, meeting_id, at, &format!("（速報）{text}"))?;
+                insert_segment_src(conn, meeting_id, at, &format!("（速報）{text}"), "backup")?;
                 used = true;
             }
         }
@@ -3112,15 +3185,155 @@ pub fn fill_gaps_from_backup(conn: &Connection, meeting_id: i64) -> Result<i64> 
     Ok(filled)
 }
 
+#[derive(Debug, Default)]
+pub struct ReplaceOutcome {
+    /// 消した Chrome の速報字幕の id（画面から取り除く）。
+    pub removed: Vec<i64>,
+    /// 新しく入れた API の確定行（あれば画面へ差し込む）。
+    pub segment: Option<Segment>,
+    /// 人が直した行があり、置き換えを見送った。
+    pub kept_manual: bool,
+}
+
+/// 終了後の API 確定（#8 redo）。区間 [start_ms, start_ms+duration) の Chrome の速報字幕を
+/// 控え（caption_backup）へ退避し、API の 1 行に置き換える。
+/// - 文字起こしが空のときは Chrome の行を残す（フォールバック）。
+/// - 人が直した行があるときは置き換えない（D4）。API の文は控えへ入れておく。
+/// 何度呼んでも同じ結果になる（2 回目は置き換え済みなので何もしない）。
+pub fn replace_captions_with_api(
+    conn: &Connection,
+    meeting_id: i64,
+    start_ms: i64,
+    duration_ms: i64,
+    text: &str,
+) -> Result<ReplaceOutcome> {
+    let text = text.trim();
+    let from = start_ms as f64 / 1000.0;
+    let span = if duration_ms > 0 { duration_ms as f64 / 1000.0 } else { 15.0 };
+    let to = from + span;
+    let tx = conn.unchecked_transaction()?;
+    // 置き換えの対象は、この区間の Chrome の速報字幕だけ。
+    // 移行前（source=''）・取り込み（'import'）・控え（'backup'）・既に確定した API（'api'）は触らない。
+    let olds: Vec<(i64, f64, String, String, bool, bool)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, start_sec, text, speaker, speaker_manual, text_manual
+             FROM segments WHERE meeting_id=?1 AND start_sec>=?2 AND start_sec<?3 AND source='chrome'
+             ORDER BY start_sec, id",
+        )?;
+        let rows = stmt.query_map(params![meeting_id, from, to], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get::<_, i64>(4)? != 0,
+                r.get::<_, i64>(5)? != 0,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    // 文字起こしが空（無音・認識できず）: Chrome の行をそのまま残す。
+    if text.is_empty() {
+        tx.commit()?;
+        return Ok(ReplaceOutcome::default());
+    }
+    // 人が本文を直した行がある: 置き換えない。API の文は控えに入れておく（D4）。
+    if olds.iter().any(|row| row.5) {
+        tx.execute(
+            "INSERT OR IGNORE INTO caption_backup (meeting_id, start_sec, text, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![meeting_id, from, text, now_stamp()],
+        )?;
+        tx.commit()?;
+        return Ok(ReplaceOutcome { kept_manual: true, ..Default::default() });
+    }
+    if olds.is_empty() {
+        // この区間に Chrome の行は無い。既に置き換え済み（API 行がある）なら何もしない（冪等）。
+        if segment_exists(&tx, meeting_id, from)? {
+            tx.commit()?;
+            return Ok(ReplaceOutcome::default());
+        }
+        // 速報が無かった区間。API の行を足す。
+        let id = insert_segment_src(&tx, meeting_id, from, text, "api")?;
+        tx.commit()?;
+        return Ok(ReplaceOutcome {
+            segment: Some(Segment { id, start_sec: from, text: text.into(), ..Default::default() }),
+            ..Default::default()
+        });
+    }
+    // Chrome の行を控えへ退避してから、API の 1 行に置き換える。
+    for (_, at, old_text, _, _, _) in &olds {
+        tx.execute(
+            "INSERT OR IGNORE INTO caption_backup (meeting_id, start_sec, text, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![meeting_id, at, old_text, now_stamp()],
+        )?;
+    }
+    // 人が付けた話者は新しい行へ写す。
+    let speaker = olds.iter().find(|row| row.4).map(|row| row.3.clone());
+    let new_id = insert_segment_src(&tx, meeting_id, from, text, "api")?;
+    if let Some(sp) = &speaker {
+        tx.execute(
+            "UPDATE segments SET speaker=?1, speaker_manual=1 WHERE id=?2",
+            params![sp, new_id],
+        )?;
+    }
+    let removed: Vec<i64> = olds.iter().map(|row| row.0).collect();
+    for id in &removed {
+        // 回答の根拠・メモの指し先を新しい行へ付け替える（DELETE の CASCADE で消さない）。
+        tx.execute("UPDATE question_evidence SET segment_id=?1 WHERE segment_id=?2", params![new_id, id])?;
+        tx.execute("UPDATE meeting_notes SET segment_id=?1 WHERE segment_id=?2", params![new_id, id])?;
+        tx.execute("DELETE FROM segments WHERE id=?1 AND meeting_id=?2", params![id, meeting_id])?;
+    }
+    tx.commit()?;
+    Ok(ReplaceOutcome {
+        removed,
+        segment: Some(Segment { id: new_id, start_sec: from, text: text.into(), speaker: speaker.unwrap_or_default() }),
+        kept_manual: false,
+    })
+}
+
+/// 録音が途切れた箇所（画面ロック・省電力）を記録する（P5）。同じ位置は 1 件にまとめる（冪等）。
+pub fn record_gap(conn: &Connection, meeting_id: i64, at_sec: f64, lost_sec: f64, reason: &str) -> Result<()> {
+    if !at_sec.is_finite() || at_sec < 0.0 || !lost_sec.is_finite() || lost_sec <= 0.0 {
+        return Ok(());
+    }
+    let reason: String = reason.trim().chars().take(40).collect();
+    conn.execute(
+        "INSERT OR IGNORE INTO meeting_gaps (meeting_id, at_sec, lost_sec, reason, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![meeting_id, at_sec, lost_sec, reason, now_stamp()],
+    )?;
+    Ok(())
+}
+
+/// 録音が途切れた箇所を、起きた順に返す（at_sec, lost_sec, reason）。
+pub fn list_gaps(conn: &Connection, meeting_id: i64) -> Result<Vec<(f64, f64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT at_sec, lost_sec, reason FROM meeting_gaps WHERE meeting_id=?1 ORDER BY at_sec",
+    )?;
+    let rows = stmt.query_map([meeting_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 pub fn insert_segment(
     conn: &Connection,
     meeting_id: i64,
     start_sec: f64,
     text: &str,
 ) -> Result<i64> {
+    insert_segment_src(conn, meeting_id, start_sec, text, "")
+}
+
+/// 出どころ（source）を付けて書き起こしの一文を足す。
+/// 'chrome' の行だけが、終了後の API 確定で置き換えの対象になる（`replace_captions_with_api`）。
+pub fn insert_segment_src(
+    conn: &Connection,
+    meeting_id: i64,
+    start_sec: f64,
+    text: &str,
+    source: &str,
+) -> Result<i64> {
     conn.execute(
-        "INSERT INTO segments (meeting_id, start_sec, text) VALUES (?1, ?2, ?3)",
-        params![meeting_id, start_sec, text],
+        "INSERT INTO segments (meeting_id, start_sec, text, source) VALUES (?1, ?2, ?3, ?4)",
+        params![meeting_id, start_sec, text, source],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -3342,6 +3555,175 @@ mod tests {
         let id = create_meeting(conn, user, "会議", &["予算は？".into(), "期限は？".into()]).unwrap();
         set_live(conn, id).unwrap();
         id
+    }
+
+    fn job_status(conn: &Connection, meeting_id: i64) -> String {
+        conn.query_row("SELECT status FROM audio_jobs WHERE meeting_id=?1 ORDER BY id LIMIT 1", [meeting_id], |r| r.get(0)).unwrap()
+    }
+
+    fn backup_count(conn: &Connection, meeting_id: i64) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM caption_backup WHERE meeting_id=?1", [meeting_id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn chrome_close_api_marks_redo_and_promotes_held() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        set_speech(&conn, id, "chrome", false).unwrap();
+        enqueue_audio(&mut conn, id, 0, "/tmp/0.wav", 15.0, false).unwrap();
+        assert_eq!(job_status(&conn, id), "held");
+        prepare_finish(&conn, id, "api").unwrap();
+        // Chrome の会議は 'redo' に読み替え、保留を文字起こし待ちへ上げる。
+        assert_eq!(finish_close(&conn, id).unwrap(), "redo");
+        assert_eq!(job_status(&conn, id), "pending");
+    }
+
+    #[test]
+    fn api_meeting_close_api_stays_api_not_redo() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        // 録音中から API の会議（速報字幕が無いので置き換え不要）。
+        set_speech(&conn, id, "api", false).unwrap();
+        prepare_finish(&conn, id, "api").unwrap();
+        assert_eq!(finish_close(&conn, id).unwrap(), "api");
+    }
+
+    #[test]
+    fn cancel_finish_demotes_redo_jobs() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        set_speech(&conn, id, "chrome", false).unwrap();
+        enqueue_audio(&mut conn, id, 0, "/tmp/0.wav", 15.0, false).unwrap();
+        prepare_finish(&conn, id, "api").unwrap();
+        assert_eq!(job_status(&conn, id), "pending");
+        cancel_finish(&conn, id).unwrap();
+        // 録音に戻ると、保留へ戻し、redo の印も消す。
+        assert_eq!(finish_close(&conn, id).unwrap(), "");
+        assert_eq!(job_status(&conn, id), "held");
+    }
+
+    #[test]
+    fn replace_moves_captions_to_backup_and_repoints_evidence() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        set_speech(&conn, id, "chrome", false).unwrap();
+        save_caption(&conn, id, 1.2, "字幕その一").unwrap();
+        save_caption(&conn, id, 9.0, "字幕その二").unwrap();
+        let olds = list_segments(&conn, id).unwrap();
+        assert_eq!(olds.len(), 2);
+        let q = list_questions(&conn, id).unwrap()[0].id;
+        conn.execute(
+            "INSERT INTO question_evidence (question_id, segment_id, quote, created_at) VALUES (?1,?2,?3,?4)",
+            params![q, olds[0].id, "引用", now_stamp()],
+        ).unwrap();
+        let outcome = replace_captions_with_api(&conn, id, 0, 15000, "API の確定文").unwrap();
+        let segs = list_segments(&conn, id).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "API の確定文");
+        assert!(segs[0].start_sec.abs() < 1e-9);
+        let src: String = conn.query_row("SELECT source FROM segments WHERE id=?1", [segs[0].id], |r| r.get(0)).unwrap();
+        assert_eq!(src, "api");
+        assert_eq!(backup_count(&conn, id), 2);
+        let ev_seg: i64 = conn.query_row("SELECT segment_id FROM question_evidence WHERE question_id=?1", [q], |r| r.get(0)).unwrap();
+        assert_eq!(ev_seg, segs[0].id);
+        assert_eq!(outcome.removed.len(), 2);
+    }
+
+    #[test]
+    fn replace_keeps_manually_edited_text() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        set_speech(&conn, id, "chrome", false).unwrap();
+        save_caption(&conn, id, 1.0, "直す前").unwrap();
+        let seg = list_segments(&conn, id).unwrap()[0].id;
+        update_segment(&conn, id, seg, "人が直した文", None).unwrap();
+        let outcome = replace_captions_with_api(&conn, id, 0, 15000, "API の確定文").unwrap();
+        assert!(outcome.kept_manual);
+        let segs = list_segments(&conn, id).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "人が直した文");
+        assert_eq!(backup_count(&conn, id), 1);
+    }
+
+    #[test]
+    fn replace_empty_transcript_keeps_chrome() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        set_speech(&conn, id, "chrome", false).unwrap();
+        save_caption(&conn, id, 1.0, "速報は残す").unwrap();
+        let outcome = replace_captions_with_api(&conn, id, 0, 15000, "   ").unwrap();
+        assert!(outcome.segment.is_none());
+        let segs = list_segments(&conn, id).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "速報は残す");
+    }
+
+    #[test]
+    fn replace_is_idempotent() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        set_speech(&conn, id, "chrome", false).unwrap();
+        save_caption(&conn, id, 1.0, "速報").unwrap();
+        replace_captions_with_api(&conn, id, 0, 15000, "確定").unwrap();
+        replace_captions_with_api(&conn, id, 0, 15000, "確定").unwrap();
+        let segs = list_segments(&conn, id).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "確定");
+    }
+
+    #[test]
+    fn replace_does_not_touch_legacy_rows() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        insert_segment(&conn, id, 1.0, "移行前の行").unwrap();
+        let outcome = replace_captions_with_api(&conn, id, 0, 15000, "確定").unwrap();
+        let segs = list_segments(&conn, id).unwrap();
+        assert!(segs.iter().any(|s| s.text == "移行前の行"));
+        assert!(outcome.removed.is_empty());
+    }
+
+    #[test]
+    fn off_meeting_fills_from_backup_without_key() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        set_speech(&conn, id, "off", false).unwrap();
+        enqueue_audio(&mut conn, id, 0, "/tmp/0.wav", 15.0, false).unwrap();
+        assert_eq!(job_status(&conn, id), "held");
+        save_caption(&conn, id, 2.0, "録音だけの会議の字幕").unwrap();
+        assert_eq!(backup_count(&conn, id), 1);
+        let filled = fill_gaps_from_backup(&conn, id).unwrap();
+        assert_eq!(filled, 1);
+        let segs = list_segments(&conn, id).unwrap();
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].text.contains("録音だけの会議の字幕"));
+    }
+
+    #[test]
+    fn redo_caption_after_finish_goes_to_backup() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        set_speech(&conn, id, "chrome", false).unwrap();
+        enqueue_audio(&mut conn, id, 0, "/tmp/0.wav", 15.0, false).unwrap();
+        prepare_finish(&conn, id, "api").unwrap(); // finish_close='redo'
+        // redo のあと遅れて届いた速報は、segments へ入れず控えへ（二重化を防ぐ）。
+        assert!(save_caption(&conn, id, 3.0, "終了後に届いた速報").unwrap().is_none());
+        assert!(list_segments(&conn, id).unwrap().is_empty());
+        assert_eq!(backup_count(&conn, id), 1);
+    }
+
+    #[test]
+    fn gaps_insert_or_ignore() {
+        let mut conn = memory();
+        let id = live_meeting(&mut conn);
+        record_gap(&conn, id, 30.0, 8.0, "hidden").unwrap();
+        record_gap(&conn, id, 30.0, 99.0, "sleep").unwrap();
+        record_gap(&conn, id, 60.0, 5.0, "sleep").unwrap();
+        record_gap(&conn, id, 70.0, 0.0, "sleep").unwrap(); // lost<=0 は記録しない
+        let gaps = list_gaps(&conn, id).unwrap();
+        assert_eq!(gaps.len(), 2);
+        assert_eq!(gaps[0].0, 30.0);
+        assert_eq!(gaps[0].1, 8.0);
+        assert_eq!(gaps[1].0, 60.0);
     }
 
     #[test]

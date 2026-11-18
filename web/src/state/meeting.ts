@@ -171,6 +171,18 @@ function applyEvent(event: SseEvent) {
       dropCaptionsUpTo(event.segment.start_sec);
       clearNotice("job");
       break;
+    case "segments_replaced": {
+      // 終了後の API 確定（#8）: 置き換えた Chrome の行を取り除き、API の 1 行を差し込む。
+      const removed = new Set(event.removed);
+      let segments = detail.segments.filter((seg) => !removed.has(seg.id));
+      if (event.segment) {
+        segments = upsertSegment(segments, event.segment);
+        dropCaptionsUpTo(event.segment.start_sec);
+      }
+      next = { ...detail, segments };
+      clearNotice("job");
+      break;
+    }
     case "questions":
       next = {
         ...detail,

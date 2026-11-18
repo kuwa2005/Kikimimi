@@ -5,8 +5,9 @@ import { fmt } from "../lib/format";
 import { useMediaQuery } from "../lib/media";
 import { pref, PREF_PANEL, savePref } from "../lib/prefs";
 import { useStore } from "../lib/store";
-import { localSeconds, recordingHere, saveCaption } from "../recorder/recorder";
-import { copyText, exportMarkdown } from "../state/actions";
+import { localSeconds, recorderState, recordingHere, saveCaption } from "../recorder/recorder";
+import { copyText, exportMarkdown, finishMeeting, pauseMeeting, resumeMeeting } from "../state/actions";
+import { Clock } from "../components/Meter";
 import { guarded, useBusy } from "../state/busy";
 import { openDialog } from "../state/dialog";
 import { meetingStore, openMeeting, patchDetail, setDetail, upsertSegment } from "../state/meeting";
@@ -101,6 +102,43 @@ function SegSearch({ id, value, onChange }: { id: string; value: string; onChang
   );
 }
 
+/**
+ * モバイルで常に親指の届く位置に録音の操作を固定する（画面下）。
+ * 録音ドット・経過時間・一時停止/再開・終了だけを置く。終了処理中・要約中などの
+ * 例外的な操作は従来どおりヘッダー（MeetingHead）に任せる。CSS でモバイル時だけ表示する。
+ */
+function LiveBar({ detail }: { detail: MeetingDetail }) {
+  const rec = useStore(recorderState);
+  const busyName = useBusy();
+  const meeting = detail.meeting;
+  if (meeting.status === "done" || meeting.status === "wrapping" || meeting.finish_requested) return null;
+  const here = rec.capturing && rec.meetingId === meeting.id;
+  const disabled = !!busyName;
+  return (
+    <div className="live-bar" role="group" aria-label="録音の操作">
+      <span className={`chip ${here ? "live" : meeting.status === "paused" ? "paused" : "idle"}`}>
+        {here ? <span className="dot" aria-hidden="true" /> : null}
+        {here ? "録音中" : meeting.status === "paused" ? "一時停止" : "停止中"}
+      </span>
+      <Clock meetingId={meeting.id} fallback={meeting.duration_sec} />
+      <div className="live-bar-actions">
+        {here ? (
+          <button className="btn" type="button" disabled={disabled} onClick={() => void guarded("pause", () => pauseMeeting(meeting.id))}>
+            一時停止
+          </button>
+        ) : (
+          <button className="btn primary" type="button" disabled={disabled} onClick={() => void guarded("resume", () => resumeMeeting(meeting.id))}>
+            {meeting.status === "paused" ? "再開" : "録音を再開"}
+          </button>
+        )}
+        <button className="btn danger" type="button" disabled={disabled} onClick={() => void guarded("finish", () => finishMeeting(meeting.id))}>
+          終了
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function LiveView({ detail }: { detail: MeetingDetail }) {
   const wide = useMediaQuery("(min-width: 1380px)");
   const mid = useMediaQuery("(min-width: 960px)");
@@ -136,7 +174,7 @@ function LiveView({ detail }: { detail: MeetingDetail }) {
       if (!alive) return;
       configureCaptions(captionMode);
       if (captionMode === "off") {
-        notify("このブラウザは Chrome の音声認識に対応していません。デスクトップの Chrome で開いてください。", "warn", "caption");
+        notify("このブラウザは音声認識（速報字幕）に対応していません。Android かパソコンの Chrome でお使いください。録音は続いており、終了時に API での文字起こしも選べます。", "warn", "caption");
       }
     });
     return () => {
@@ -332,6 +370,7 @@ function LiveView({ detail }: { detail: MeetingDetail }) {
       <Notices />
       <AssistBar detail={detail} />
       {body}
+      <LiveBar detail={detail} />
       {importing ? <ImportDialog detail={detail} onClose={() => setImporting(false)} /> : null}
     </div>
   );

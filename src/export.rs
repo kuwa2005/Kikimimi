@@ -17,6 +17,8 @@ pub struct Minutes {
     pub notes: Vec<Note>,
     /// 「ここ重要」の印。
     pub marks: Vec<Mark>,
+    /// 録音が途切れた箇所（at_sec, lost_sec, reason）。画面ロック・省電力で録れなかった時間（P5）。
+    pub gaps: Vec<(f64, f64, String)>,
 }
 
 pub fn note_label(kind: &str) -> &'static str {
@@ -80,7 +82,27 @@ pub fn load_minutes(conn: &rusqlite::Connection, meeting_id: i64) -> anyhow::Res
         participants_auto: meeting.participants_auto,
         notes: db::list_notes(conn, meeting_id)?,
         marks: db::list_marks(conn, meeting_id)?,
+        gaps: db::list_gaps(conn, meeting_id)?,
     }))
+}
+
+/// 録音が途切れた箇所の見出し用のまとめ（回数・合計秒）。無ければ空。
+pub fn gaps_note(gaps: &[(f64, f64, String)]) -> String {
+    if gaps.is_empty() {
+        return String::new();
+    }
+    let total: f64 = gaps.iter().map(|g| g.1).sum();
+    format!("録音が途切れた箇所: {} 回 / 計 約 {} 秒（画面ロック・省電力の可能性）", gaps.len(), total.round() as i64)
+}
+
+/// 録音が途切れた箇所を、議事録に差し込む行にする。〔録音なし 約 N 秒：理由〕。
+pub fn gap_marker(lost_sec: f64, reason: &str) -> String {
+    let why = match reason {
+        "hidden" => "画面を離れた／切り替えた",
+        "sleep" => "スリープ・省電力",
+        _ => "画面ロック・省電力",
+    };
+    format!("〔録音なし 約 {} 秒：{why}のため〕", lost_sec.round().max(1.0) as i64)
 }
 
 /// 保存した UTC の時刻を、サーバの地域時刻（TZ）で読みやすく直す。
@@ -353,6 +375,13 @@ fn draft_from_record(minutes: &Minutes, lead: &str, actions: &str) -> String {
             ));
         }
     }
+    if !minutes.gaps.is_empty() {
+        out.push_str("\n## 録音が途切れた箇所\n\n");
+        out.push_str(&format!("- {}\n", gaps_note(&minutes.gaps)));
+        for (at, lost, reason) in &minutes.gaps {
+            out.push_str(&format!("  - [{}] {}\n", timestamp(*at), gap_marker(*lost, reason)));
+        }
+    }
     out.push_str("\n## アクションアイテム\n\n");
     out.push_str(&format!("- {actions}\n"));
     out
@@ -404,6 +433,7 @@ mod tests {
             participants_auto: false,
             notes: Vec::new(),
             marks: Vec::new(),
+            gaps: Vec::new(),
         }
     }
 

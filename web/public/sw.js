@@ -1,6 +1,16 @@
 // 画面のファイルを端末にキャッシュし、回線が無い・弱いときでも画面を開いて録音を始められるようにする。
 // API（/api/）は扱わない（録音と書き起こしの保存は、画面側の保管庫 IndexedDB が受け持つ）。
-const CACHE = "kikimimi-shell-v1";
+const CACHE = "kikimimi-shell-v2";
+// ホーム画面に置いたアプリ（PWA）として開けるよう、先に端末へ保存しておくもの。
+const APP_SHELL = [
+  "/capture-worklet.js",
+  "/manifest.webmanifest",
+  "/icons/icon-192.png",
+  "/icons/icon-512.png",
+  "/icons/icon-maskable-512.png",
+  "/icons/apple-touch-icon.png",
+  "/icons/icon.svg",
+];
 // 弱い回線で画面の読み込みを待ちすぎない。これを超えたらキャッシュの画面を出す。
 const NAV_TIMEOUT_MS = 4000;
 
@@ -32,7 +42,8 @@ async function refresh(response) {
 
 async function precache() {
   const cache = await caches.open(CACHE);
-  await cache.add("/capture-worklet.js");
+  // アイコンなどが一部取れなくても、画面のキャッシュは続ける。
+  await Promise.all(APP_SHELL.map((path) => cache.add(path).catch(() => {})));
   const response = await fetch("/", { cache: "no-store" });
   if (response.ok) await refresh(response);
 }

@@ -54,6 +54,9 @@ const cap = {
   sentSamples: 0,
   buffers: [] as Float32Array[],
   buffered: 0,
+  /** 録音開始前の数秒の音（プリロール）。新しく録音を始めたとき、最初の区間の頭に付ける。 */
+  preroll: [] as Float32Array[],
+  prerolled: 0,
   queue: [] as QueueItem[],
   /** 送り直しても今は受け付けられない区間（会議の終了後・上限など）。端末に残し、取り込みとして送る。 */
   parked: [] as QueueItem[],
@@ -65,6 +68,8 @@ const cap = {
   level: 0,
   ready: null as Promise<void> | null,
   lastPcmAt: 0,
+  /** 直近で画面が裏に回った時刻（途切れの理由を「画面ロック」か「省電力」か分けるため）。 */
+  hiddenSince: 0,
   micProblem: "",
   recovering: false,
   recoveries: 0,
@@ -224,13 +229,98 @@ function watchMic(stream: MediaStream, ctx: AudioContext) {
     track.addEventListener("mute", lost);
   }
   ctx.onstatechange = () => {
-    if (!cap.capturing) return;
     const state = ctx.state as string;
+    if (state === "running") clearNotice("tap");
+    if (!cap.capturing) return;
     if (state === "suspended" || state === "interrupted") {
-      noteMicProblem("マイクの処理が止まっています。復帰を試みます。");
+      noteMicProblem("マイクの処理が止まっています。復帰を試みます（止まったままなら、画面を 1 回タップしてください）。");
       ctx.resume().catch(() => {});
+      // iOS の復帰後など、タップが無いと再開できないことがある。次の操作で起こす。
+      armGestureResume();
     }
   };
+}
+
+/**
+ * ブラウザの自動再生の制限（ページを開いた直後で、まだ画面に触れていない・iOS で裏から戻った直後など）では、
+ * AudioContext.resume() がタップを待ったまま終わらないことがある。待ち続けると録音の開始そのものが止まるので、
+ * 少し待って動かなければ先へ進め、次に画面に触れた瞬間に起こす。
+ */
+const RESUME_WAIT_MS = 1500;
+let gestureArmed = false;
+const GESTURES = ["pointerdown", "keydown", "touchend"] as const;
+
+function onGesture() {
+  const ctx = cap.ctx;
+  if (!ctx || ctx.state === "running" || ctx.state === "closed") {
+    disarmGestureResume();
+    return;
+  }
+  // タップの処理の中で同期的に呼ぶ（そうしないとブラウザが許可しない）。
+  ctx
+    .resume()
+    .then(() => {
+      if (ctx.state === "running") {
+        disarmGestureResume();
+        clearNotice("tap");
+      }
+    })
+    .catch(() => {});
+}
+
+function armGestureResume() {
+  if (gestureArmed) return;
+  gestureArmed = true;
+  for (const name of GESTURES) document.addEventListener(name, onGesture, true);
+}
+
+function disarmGestureResume() {
+  if (!gestureArmed) return;
+  gestureArmed = false;
+  for (const name of GESTURES) document.removeEventListener(name, onGesture, true);
+}
+
+async function resumeWithin(ctx: AudioContext): Promise<void> {
+  if (ctx.state === "running") return;
+  await Promise.race([ctx.resume().catch(() => {}), new Promise((resolve) => setTimeout(resolve, RESUME_WAIT_MS))]);
+  if ((ctx.state as string) !== "running" && ctx.state !== "closed") {
+    armGestureResume();
+    notify("ブラウザの制限で、音声の処理が止まっています。画面のどこかを 1 回タップすると録音が始まります。", "warn", "tap");
+  }
+}
+
+/** iPhone・iPad（iPadOS は Mac と名乗るので、タッチ対応で見分ける）。 */
+function isIOS(): boolean {
+  const ua = navigator.userAgent;
+  return /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+}
+
+let iosWarned = false;
+/** iOS は画面を消す・アプリを切り替えるとマイクが止まる（Web では避けられない）。録音を始めたときに一度だけ知らせる。 */
+function warnIOS() {
+  if (iosWarned || !isIOS()) return;
+  iosWarned = true;
+  const standalone = (navigator as Navigator & { standalone?: boolean }).standalone || matchMedia("(display-mode: standalone)").matches;
+  notify(
+    "iPhone・iPad では、画面を消したり（電源ボタン）ほかのアプリに切り替えたりすると録音が止まります。録音中はこの画面を開いたままにしてください（画面は自動では消えません）。" +
+      (standalone ? "" : " 共有メニューの「ホーム画面に追加」から開くと、マイクの許可を毎回聞かれにくくなります。"),
+    "warn",
+    "ios",
+  );
+}
+
+/**
+ * 選んだマイクで、タブ音声なしで、いま開いているマイクがそのまま使えるか。
+ * 使えるなら開き直さない（マイクテスト中に話した直前の数秒もプリロールとして残る）。
+ */
+export function micMatchesSelection(): boolean {
+  const track = cap.stream?.getAudioTracks()[0];
+  if (!track || track.readyState !== "live" || !cap.ctx || cap.ctx.state === "closed") return false;
+  if (cap.includeTab || cap.tabStream) return false;
+  const wanted = pref(PREF_MIC);
+  if (!wanted) return true;
+  const current = track.getSettings?.().deviceId;
+  return !!current && current === wanted;
 }
 
 async function recoverMic() {
@@ -451,13 +541,28 @@ function closeFrame(power: number) {
   if ((spoke && seconds >= CHUNK.min && quietFor >= CHUNK.silence) || seconds >= CHUNK.max) cutChunk();
 }
 
+/** 録音が途切れた箇所をサーバに記録する（best-effort）。引き継ぎ済みの会議だけ。失敗しても録音は続く。 */
+function reportGap(atSec: number, lostSec: number, reason: string) {
+  const id = cap.meetingId;
+  // オフラインの会議（番号が負）は、サーバにまだ無いので画面の通知だけにする。
+  if (id == null || id < 0 || !Number.isFinite(atSec) || lostSec <= 0) return;
+  void request(`/api/meetings/${id}/gaps`, {
+    method: "POST",
+    body: { at_sec: atSec, lost_sec: lostSec, reason },
+    timeoutMs: 15000,
+  }).catch(() => {});
+}
+
 function onPcm(samples: Float32Array) {
   if (!samples || !samples.length) return;
   const now = Date.now();
-  // 音が数秒以上途切れていた（PC のスリープ・音声処理の停止）。その間は録音できていないことを知らせる。
+  // 音が数秒以上途切れていた（PC のスリープ・音声処理の停止）。その間は録音できていないことを知らせ、
+  // サーバにも記録して議事録に空白として残す（#8 P5）。
   if (cap.capturing && cap.lastPcmAt && now - cap.lastPcmAt > 5000) {
     const gap = Math.round((now - cap.lastPcmAt) / 1000);
     notify(`約 ${gap} 秒間、音声が途切れていました（PC のスリープや省電力の可能性）。その間は録音されていません。録音は再開しています。`, "warn", "gap");
+    const reason = cap.hiddenSince && cap.hiddenSince > cap.lastPcmAt ? "hidden" : "sleep";
+    reportGap(cap.sentSamples / 16000, gap, reason);
   }
   cap.lastPcmAt = now;
   if (cap.micProblem) {
@@ -470,9 +575,34 @@ function onPcm(samples: Float32Array) {
   cap.level = Math.sqrt(energy / Math.max(1, samples.length / 16));
   // ほぼ無音（ミュートのまま・マイクの音量が 0）。音は届いているので「届いていない」とは別に見張る。
   if (cap.level > 0.0004) cap.loudAt = now;
-  if (!cap.capturing) return;
+  if (!cap.capturing) {
+    keepPreroll(samples);
+    return;
+  }
   cap.buffers.push(samples);
   cap.buffered += samples.length;
+  feedVad(samples);
+  if (Date.now() - cap.tailAt >= TAIL_EVERY_MS) void writeTail();
+}
+
+/** マイクが開いていて録音前の間、直近 PREROLL_SEC 秒の音だけを残す（ボタンを押す直前のひと言を落とさない）。 */
+const PREROLL_SEC = 6;
+function keepPreroll(samples: Float32Array) {
+  if (!cap.stream) return;
+  cap.preroll.push(samples);
+  cap.prerolled += samples.length;
+  const limit = Math.round(cap.sampleRate * PREROLL_SEC);
+  while (cap.preroll.length > 1 && cap.prerolled - cap.preroll[0].length >= limit) {
+    cap.prerolled -= cap.preroll.shift()!.length;
+  }
+}
+
+function clearPreroll() {
+  cap.preroll = [];
+  cap.prerolled = 0;
+}
+
+function feedVad(samples: Float32Array) {
   const frameLen = Math.max(1, Math.round(cap.sampleRate * CHUNK.frame));
   const vad = cap.vad;
   for (let i = 0; i < samples.length; i++) {
@@ -485,7 +615,6 @@ function onPcm(samples: Float32Array) {
       closeFrame(power);
     }
   }
-  if (Date.now() - cap.tailAt >= TAIL_EVERY_MS) void writeTail();
 }
 
 /** 区切る前の録音を、端末の保管庫に途中保存する。ブラウザが落ちても次回に区間として送れる。 */
@@ -620,6 +749,14 @@ function transient(err: unknown): boolean {
   return err.status === 0 || err.status >= 500 || err.status === 408 || err.status === 429 || (err.status === 403 && err.code === "csrf");
 }
 
+/** 再送までの待ち時間。429/503 でサーバが待ち時間を示せばそれに従い、それ以外は揺らぎを入れて一斉再送を避ける。 */
+function retryDelay(err: unknown, delay: number): number {
+  if (err instanceof ApiError && (err.status === 429 || err.status === 503) && err.retryAfter && err.retryAfter > 0) {
+    return Math.min(err.retryAfter * 1000, 60000);
+  }
+  return delay * (0.5 + Math.random());
+}
+
 /** オフラインの会議に付けていた番号を、メモリ上のすべての待ち行列と録音中の状態で付け替える。 */
 export function rebindLocal(localId: number, serverId: number) {
   for (const list of [cap.queue, cap.parked, cap.captionQueue] as { meetingId: number }[][]) {
@@ -751,7 +888,7 @@ async function pumpUploads() {
           "warn",
           "upload",
         );
-        await waitOrWake(delay);
+        await waitOrWake(retryDelay(err, delay));
         delay = Math.min(delay * 2, 10000);
       }
     }
@@ -874,7 +1011,7 @@ async function pumpCaptions() {
         }
         if (status === 403 && err instanceof ApiError && err.code === "csrf") await sessionRefresher();
         notify("書き起こしの保存を再試行します（この端末に保存済み）。", "warn", "caption");
-        await waitOrWake(delay);
+        await waitOrWake(retryDelay(err, delay));
         delay = Math.min(delay * 2, 15000);
       }
       function done() {
@@ -1182,6 +1319,11 @@ export function setCaptureOptions(mic: string, includeTab: boolean) {
   cap.includeTab = includeTab;
 }
 
+/** タブ音声を使わず、マイクだけで録る（保存した設定は変えない）。 */
+export function micOnly() {
+  cap.includeTab = false;
+}
+
 export function useSavedTabPref() {
   cap.includeTab = pref(PREF_TAB) === "1";
 }
@@ -1189,7 +1331,7 @@ export function useSavedTabPref() {
 export function ensureAudio(): Promise<void> {
   const problem = secureContextProblem();
   if (problem) return Promise.reject(new Error(problem));
-  if (cap.stream && cap.ctx) return cap.ctx.resume().then(() => {});
+  if (cap.stream && cap.ctx) return resumeWithin(cap.ctx);
   if (cap.ready) return cap.ready;
   const ready = (async () => {
     const stream = await openMic(pref(PREF_MIC));
@@ -1209,7 +1351,28 @@ export function ensureAudio(): Promise<void> {
     } catch {
       ctx = new AudioContext();
     }
-    await ctx.resume();
+    // Firefox は、マイクと異なるサンプルレートの AudioContext に createMediaStreamSource すると例外を投げる。
+    // そのときは端末本来のレートで作り直し（間引きは自前で行う）、録音できない状態を避ける。
+    let rawMic: MediaStreamAudioSourceNode;
+    let tabSource: MediaStreamAudioSourceNode | null = null;
+    try {
+      rawMic = ctx.createMediaStreamSource(stream);
+      if (tabStream) tabSource = ctx.createMediaStreamSource(tabStream);
+    } catch {
+      ctx.close().catch(() => {});
+      ctx = new AudioContext();
+      try {
+        rawMic = ctx.createMediaStreamSource(stream);
+        if (tabStream) tabSource = ctx.createMediaStreamSource(tabStream);
+      } catch (err) {
+        ctx.close().catch(() => {});
+        stream.getTracks().forEach((track) => track.stop());
+        tabStream?.getTracks().forEach((track) => track.stop());
+        throw err;
+      }
+    }
+    // タップが無いと動かない環境でも、ここで止まらない（動き出したら音が届き始める）。
+    await resumeWithin(ctx);
     cap.sampleRate = ctx.sampleRate;
     cap.stream = stream;
     cap.tabStream = tabStream;
@@ -1233,7 +1396,6 @@ export function ensureAudio(): Promise<void> {
       };
       node = processor;
     }
-    const rawMic = ctx.createMediaStreamSource(stream);
     // マイクの音を整える経路（音声強化）。オフのときは素通しの値にしておき、録音中でも切り替えられる。
     const highpass = ctx.createBiquadFilter();
     highpass.type = "highpass";
@@ -1250,8 +1412,7 @@ export function ensureAudio(): Promise<void> {
     // 速報字幕（Chrome の音声認識）には、録音と同じ音（マイク＋タブ音声）を渡す。
     const mix = ctx.createMediaStreamDestination();
     micSource.connect(mix);
-    if (tabStream) {
-      const tabSource = ctx.createMediaStreamSource(tabStream);
+    if (tabSource) {
       tabSource.connect(node);
       tabSource.connect(mix);
     }
@@ -1283,6 +1444,9 @@ export function stopStream() {
   cap.tabStream = null;
   cap.mixTrack = null;
   cap.ready = null;
+  clearPreroll();
+  disarmGestureResume();
+  clearNotice("tap");
   if (cap.ctx) cap.ctx.close().catch(() => {});
   cap.ctx = null;
   cap.chain = null;
@@ -1393,7 +1557,15 @@ export function startCapturing(meetingId: number, userId: number, samples: numbe
   currentUserId = userId;
   void preflight();
   resetVad();
+  // 新しく始めるときだけ、開始前の数秒を頭に付ける。再開（samples>0）では録音位置が重なるので付けない。
+  if (samples === 0 && cap.prerolled) {
+    cap.buffers = cap.preroll;
+    cap.buffered = cap.prerolled;
+    for (const buf of cap.preroll) feedVad(buf);
+  }
+  clearPreroll();
   clearNotice("mic");
+  warnIOS();
   holdRecLock(meetingId);
   void holdWakeLock();
   void vault.askPersistent();
@@ -1414,7 +1586,10 @@ setInterval(() => {
   if (!cap.capturing) return;
   watchQuality();
   // 省電力・画面オフ・別のウィンドウへの切り替えで音声処理が止められたら、起こし直す。
-  if (cap.ctx && cap.ctx.state !== "running" && cap.ctx.state !== "closed") cap.ctx.resume().catch(() => {});
+  if (cap.ctx && cap.ctx.state !== "running" && cap.ctx.state !== "closed") {
+    cap.ctx.resume().catch(() => {});
+    armGestureResume();
+  }
   if (cap.micProblem) {
     const track = cap.stream?.getAudioTracks()[0];
     if (!track || track.readyState === "ended") void recoverMic();
@@ -1443,6 +1618,7 @@ document.addEventListener("visibilitychange", () => {
     kick();
   } else if (cap.capturing) {
     // 裏に回る（画面ロック・別ウィンドウ・最小化）ときは、区切る前の録音もすぐ保存する。
+    cap.hiddenSince = Date.now();
     void writeTail();
   }
 });

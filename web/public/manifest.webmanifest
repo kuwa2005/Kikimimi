@@ -1,0 +1,26 @@
+{
+  "name": "会議支援（聞き耳）",
+  "short_name": "聞き耳",
+  "description": "会議を録音しながら、文字起こし・アジェンダの進行・議事録づくりを助けます。",
+  "lang": "ja",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#172421",
+  "theme_color": "#0e6a56",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "すぐに録音を開始",
+      "short_name": "すぐ録音",
+      "description": "会議を作ってその場で録音を始めます。",
+      "url": "/?quick=1",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ]
+}

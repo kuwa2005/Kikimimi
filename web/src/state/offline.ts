@@ -56,13 +56,16 @@ function fallbackTitle(createdAt: number) {
   return `オフラインで録音した会議 ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** 回線が無いときに会議を始める。マイクだけ開き、端末に録音する。 */
-export async function beginOfflineMeeting(form: MeetingForm) {
+/**
+ * 回線が無いときに会議を始める。マイクだけ開き、端末に録音する。
+ * keepStream: 呼び出し側（beginMeeting）がマイクを開き済み。開き直さず、溜まったプリロールも残す。
+ */
+export async function beginOfflineMeeting(form: MeetingForm, keepStream = false) {
   const user = currentUser();
   if (!user) throw new Error("ログインしてください");
   const rec = recorderState.get();
   if (rec.capturing) throw new Error("録音中の会議があります。先に一時停止か終了をしてください");
-  if (!rec.capturing) stopStream();
+  if (!keepStream) stopStream();
   await ensureAudio();
   const createdAt = Date.now();
   const questions: string[] = [];
@@ -88,13 +91,20 @@ export async function beginOfflineMeeting(form: MeetingForm) {
     finishClose: null,
     seconds: 0,
   };
-  try {
-    await vault.putMeeting(meeting);
-  } catch {
-    notify("この端末に会議を保存できません。録音はメモリにだけ残ります。ブラウザを閉じないでください。", "error", "vault");
-  }
+  // 先に録音を始める。端末の保管庫（IndexedDB）が応答しなくても、録音の開始を待たせない。
   startCapturing(meeting.localId, user.id, 0);
-  await reload();
+  // 保管庫への保存と一覧の更新は、全体で最長 1.2 秒だけ待つ。ふつうは一瞬で終わるので、これまでどおり
+  // 保存できてから画面を移す。IndexedDB が固まっても、画面遷移・通知・開始処理の解放（beginInFlight の
+  // finally）まで止めない。保存できていなくても録音はメモリで続く。
+  const tail = (async () => {
+    try {
+      await vault.putMeeting(meeting);
+    } catch {
+      notify("この端末に会議を保存できません。録音はメモリにだけ残ります。ブラウザを閉じないでください。", "error", "vault");
+    }
+    await reload();
+  })();
+  await Promise.race([tail, new Promise<void>((resolve) => setTimeout(resolve, 1200))]);
   navigate(localHash(meeting.localId));
   notify("オフラインで会議を始めました。録音はこの端末に保存し、つながったら自動でサーバへ送ります。", "info", "net");
   kickUploads();

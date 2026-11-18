@@ -5,7 +5,7 @@ import { clearSessionData } from "../lib/prefs";
 import { navigate } from "../lib/router";
 import { openDialog } from "./dialog";
 import { clearAllNotices, notify } from "./notices";
-import { clearForm, formKey, setSetupReturn, type MeetingForm } from "./draft";
+import { clearForm, emptyForm, formKey, setSetupReturn, type MeetingForm } from "./draft";
 import { closeMeeting, currentDetail, setDetail } from "./meeting";
 import { currentUser, isOffline, leaveSession } from "./session";
 import { beginOfflineMeeting } from "./offline";
@@ -14,6 +14,8 @@ import {
   dropQueue,
   ensureAudio,
   haltCapture,
+  micMatchesSelection,
+  micOnly,
   parkQueue,
   queuedFor,
   queueLength,
@@ -101,36 +103,68 @@ function cleanAgenda(form: MeetingForm): { questions: string[]; agenda_minutes: 
   return { questions, agenda_minutes };
 }
 
-export async function saveMeeting(form: MeetingForm, existingId: number | null): Promise<MeetingDetail> {
+/** 開始の導線で使う、サーバ呼び出しの待ち時間の上限。半端に切れた回線で止まらず、オフライン開始に切り替える。 */
+const START_TIMEOUT_MS = 4000;
+
+export async function saveMeeting(form: MeetingForm, existingId: number | null, timeoutMs?: number): Promise<MeetingDetail> {
   let title = form.title.trim();
   if (existingId == null && !title) title = nowTitle();
   if (existingId != null && !title) throw new Error("会議タイトルを入力してください");
   const body = { title, ...cleanAgenda(form), participants: form.participants };
   if (existingId == null) {
     const folder = form.folderId && /^\d+$/.test(form.folderId) ? Number(form.folderId) : null;
-    return api<MeetingDetail>("/api/meetings", { method: "POST", body: { ...body, folder_id: folder } });
+    return api<MeetingDetail>("/api/meetings", { method: "POST", body: { ...body, folder_id: folder }, timeoutMs });
   }
-  return api<MeetingDetail>(`/api/meetings/${existingId}`, { method: "PUT", body });
+  return api<MeetingDetail>(`/api/meetings/${existingId}`, { method: "PUT", body, timeoutMs });
 }
 
+/** 録音を始められないほどサーバが使えない状態か（回線断、またはサーバの 5xx）。このときは端末だけで開始する。 */
+function startUnavailable(err: unknown): boolean {
+  return isNetworkError(err) || (err instanceof ApiError && err.status >= 500);
+}
+
+/** 進行中の「録音開始」。2 回同時に押しても、マイクを二重に開いて会議を 2 つ作らないようにする。 */
+let beginInFlight: Promise<void> | null = null;
+
 /** 会議を開始する。APIキーが無ければ、入力を残したまま設定へ案内する。 */
-export async function beginMeeting(form: MeetingForm, existingId: number | null) {
+export function beginMeeting(form: MeetingForm, existingId: number | null): Promise<void> {
+  // 同時開始を 1 つにまとめる。2 つ目の呼び出しは進行中の開始を待つ（どの経路で終わっても finally で解放する）。
+  if (beginInFlight) return beginInFlight;
+  beginInFlight = beginMeetingInner(form, existingId).finally(() => {
+    beginInFlight = null;
+  });
+  return beginInFlight;
+}
+
+async function beginMeetingInner(form: MeetingForm, existingId: number | null): Promise<void> {
   const rec = recorderState.get();
   if (rec.capturing && rec.meetingId !== existingId) {
     throw new Error("録音中の会議があります。先に一時停止か終了をしてください");
   }
   const user = currentUser();
   if (!user) throw new Error("ログインしてください");
+  // サーバを待つ前にマイクを開く。押した瞬間から音を拾い始め（開始前の数秒はプリロールに残る）、回線の状態に左右されない。
+  // テスト中のマイクは止め、選んだマイクとタブ音声で開き直す。開けなければ録音できないので、ここで中断する。
+  // 選んだマイクがすでに開いていれば（マイクテスト中など）開き直さない。押す直前の数秒もプリロールに残る。
+  if (!rec.capturing && !micMatchesSelection()) stopStream();
+  await ensureAudio();
   // 回線が無い（サーバに届かない）ときは、端末だけで会議を始める。つながったら自動で引き継ぐ。
-  if (isOffline() || !navigator.onLine) return beginOfflineMeeting(form);
+  if (isOffline() || !navigator.onLine) return beginOfflineMeeting(form, true);
+  // 開始系 API（settings → 会議作成 → start）全体に 1 つの締め切りを設ける。各呼び出しに
+  // 個別のタイムアウトを付けると、応答の遅い回線では合計で最長 3 倍まで待ってしまい、プリロール
+  // （直近数秒）を超えた音を失う。残り時間を各呼び出しに渡し、合計の待ちを START_TIMEOUT_MS 程度に抑える。
+  const deadline = Date.now() + START_TIMEOUT_MS;
+  const budget = () => Math.max(500, deadline - Date.now());
   let settings: Settings;
   try {
-    settings = await api<Settings>("/api/settings");
+    settings = await api<Settings>("/api/settings", { timeoutMs: budget() });
   } catch (err) {
-    if (isNetworkError(err)) return beginOfflineMeeting(form);
+    if (startUnavailable(err)) return beginOfflineMeeting(form, true);
+    if (!recorderState.get().capturing) stopStream();
     throw err;
   }
   if (form.speech === "api" && !transcribeReady(settings)) {
+    if (!recorderState.get().capturing) stopStream();
     setSetupReturn(existingId == null ? "#/new" : `#/m/${existingId}`);
     notify(`先に ${missingKeyName(settings)} の APIキーを登録してください。登録すると、入力した会議の準備に戻れます。Chrome の音声認識なら、キーがなくても始められます。`, "warn", "setup");
     navigate("#/settings");
@@ -138,17 +172,15 @@ export async function beginMeeting(form: MeetingForm, existingId: number | null)
   }
   let started: MeetingDetail;
   try {
-    // テスト中のマイクを止め、選んだマイクとタブ音声で開き直す。
-    if (!rec.capturing) stopStream();
-    await ensureAudio();
-    const saved = await saveMeeting(form, existingId);
+    const saved = await saveMeeting(form, existingId, budget());
     started = await api<MeetingDetail>(`/api/meetings/${saved.meeting.id}/start`, {
       method: "POST",
       body: { speech: form.speech, transcript_only: form.speech === "api" && form.transcriptOnly },
+      timeoutMs: budget(),
     });
   } catch (err) {
-    // 回線が切れていたら、端末だけで会議を始める（録音の機会を逃さない）。
-    if (isNetworkError(err)) return beginOfflineMeeting(form);
+    // 回線が切れていたら、端末だけで会議を始める（録音の機会を逃さない）。マイクは開いたまま引き継ぐ。
+    if (startUnavailable(err)) return beginOfflineMeeting(form, true);
     // 開始できなかったのにマイクを掴み続けない。
     if (!recorderState.get().capturing) stopStream();
     throw err;
@@ -161,24 +193,37 @@ export async function beginMeeting(form: MeetingForm, existingId: number | null)
 }
 
 /**
+ * ワンタップで即録音（モバイルのショートカット）。タイトルは未入力（開始時に現在日時）、
+ * 文字起こしは Chrome の音声認識（APIキー不要で必ず動く）、マイクは既定・アジェンダは空で始める。
+ * 中身は beginMeeting に任せるので、オフライン・APIキー未登録のフォールバックもそのまま効く。
+ * タイトル・参加者・議題は、ライブ画面の「編集」や「＋追加」で後から足せる。
+ */
+export async function quickStart() {
+  // 前の会議でタブ音声を取り込んでいても、ワンタップではマイクだけで始める（画面共有の選択で止まらない・モバイルでも動く）。
+  micOnly();
+  await beginMeeting({ ...emptyForm(), speech: "chrome" }, null);
+}
+
+/**
  * 会議を開始するが、録音はしない（一時停止のまま）。マイクは開かない（#101）。
  * あとから「再開」で録音を始めるか、「取り込む…」でボイスレコーダーの録音を足す。
  */
 export async function beginMeetingPaused(form: MeetingForm, existingId: number | null) {
   if (!currentUser()) throw new Error("ログインしてください");
-  const settings = await api<Settings>("/api/settings");
+  const settings = await api<Settings>("/api/settings", { timeoutMs: START_TIMEOUT_MS });
   if (form.speech === "api" && !transcribeReady(settings)) {
     setSetupReturn(existingId == null ? "#/new" : `#/m/${existingId}`);
     notify(`先に ${missingKeyName(settings)} の APIキーを登録してください。登録すると、入力した会議の準備に戻れます。Chrome の音声認識なら、キーがなくても始められます。`, "warn", "setup");
     navigate("#/settings");
     return;
   }
-  const saved = await saveMeeting(form, existingId);
+  const saved = await saveMeeting(form, existingId, START_TIMEOUT_MS);
   await api(`/api/meetings/${saved.meeting.id}/start`, {
     method: "POST",
     body: { speech: form.speech, transcript_only: form.speech === "api" && form.transcriptOnly },
+    timeoutMs: START_TIMEOUT_MS,
   });
-  const paused = await api<MeetingDetail>(`/api/meetings/${saved.meeting.id}/pause`, { method: "POST" });
+  const paused = await api<MeetingDetail>(`/api/meetings/${saved.meeting.id}/pause`, { method: "POST", timeoutMs: START_TIMEOUT_MS });
   clearForm(formKey(existingId));
   setDetail(paused);
   navigate(`#/m/${saved.meeting.id}`);
@@ -220,7 +265,7 @@ export async function resumeMeeting(id: number) {
   useSavedTabPref();
   const open = currentDetail();
   if (open && open.meeting.id === id && (open.meeting.speech || "api") === "api") {
-    const settings = await api<Settings>("/api/settings");
+    const settings = await api<Settings>("/api/settings", { timeoutMs: START_TIMEOUT_MS });
     if (!transcribeReady(settings)) {
       notify("API の文字起こしにはキーが必要です。録音中の切り替えで Chrome の音声認識にするか、設定でキーを登録してください。", "warn");
       navigate("#/settings");
@@ -230,7 +275,7 @@ export async function resumeMeeting(id: number) {
   await ensureAudio();
   let detail: MeetingDetail;
   try {
-    detail = await api<MeetingDetail>(`/api/meetings/${id}/resume`, { method: "POST" });
+    detail = await api<MeetingDetail>(`/api/meetings/${id}/resume`, { method: "POST", timeoutMs: START_TIMEOUT_MS });
   } catch (err) {
     if (!recorderState.get().capturing) stopStream();
     throw err;
@@ -254,9 +299,10 @@ function finishOptions(keys: { transcribe: boolean; chat: boolean }): { value: s
   ];
 }
 
-function defaultClose(detail: MeetingDetail | null, keys: { transcribe: boolean; chat: boolean }): string {
-  const speech = detail?.meeting.speech || "api";
-  if (speech === "api" && keys.transcribe) return "api";
+function defaultClose(keys: { transcribe: boolean; chat: boolean }): string {
+  // #8 D1（既定オン）: 文字起こし用のキーがあれば、Chrome・録音だけの会議でも、終了時に
+  // 録音から API で確定し直す（速報字幕を API の確定文へ置き換え、二重化せず確実に文字起こしする）。
+  if (keys.transcribe) return "api";
   if (keys.chat) return "chrome";
   return "plain";
 }
@@ -291,7 +337,7 @@ export async function finishMeeting(id: number, reason?: string) {
         name: "close",
         label: "終了のしかた",
         type: "select",
-        value: defaultClose(current, keys),
+        value: defaultClose(keys),
         options: finishOptions(keys),
       },
     ],

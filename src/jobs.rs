@@ -314,7 +314,7 @@ async fn process_audio(state: &AppState, job: db::AudioJob) {
         }
     };
     // キーは会議の持ち主のものを、処理の直前に読む。待ち行列にキーの写しは持たない。
-    let (owner, settings, recent, questions, transcript_only) = {
+    let (owner, settings, recent, questions, transcript_only, redo, duration_ms) = {
         let conn = state.db().lock().await;
         let owner = match db::meeting_owner(&conn, job.meeting_id) {
             Ok(Some(Some(owner))) => owner,
@@ -340,10 +340,14 @@ async fn process_audio(state: &AppState, job: db::AudioJob) {
         let recent = db::recent_transcript(&conn, job.meeting_id, job.start_ms).unwrap_or_default();
         let questions = db::list_questions(&conn, job.meeting_id).unwrap_or_default();
         let transcript_only = db::meeting_ears(&conn, job.meeting_id).map(|(_, only)| only).unwrap_or(false);
-        (owner, settings, recent, questions, transcript_only)
+        // 終了後の API 確定（#8 redo）: Chrome・録音だけの会議を録音から文字起こし直し、
+        // 区間ごとに速報字幕を API の確定文へ置き換える。文字起こしだけを使う（回答・メモは録音中に作成済み）。
+        let redo = db::finish_close(&conn, job.meeting_id).map(|c| c == "redo").unwrap_or(false);
+        let duration_ms = db::audio_duration_ms(&conn, job.id).unwrap_or(0);
+        (owner, settings, recent, questions, transcript_only, redo, duration_ms)
     };
-    // 文字だけのときは、回答や要約用のキーが無くても文字起こし用のキーで進める。
-    let mut ai = match if transcript_only {
+    // 文字だけ・redo のときは、回答や要約用のキーが無くても文字起こし用のキーで進める。
+    let mut ai = match if transcript_only || redo {
         Ai::for_transcribe(state, owner, &settings).await
     } else {
         Ai::from_settings(state, owner, &settings).await
@@ -357,7 +361,7 @@ async fn process_audio(state: &AppState, job: db::AudioJob) {
     let mut quick_retry = false;
     let mut switches = 0;
     let analysis = loop {
-        let heard = if transcript_only {
+        let heard = if transcript_only || redo {
             ai.transcribe_wav(state, &wav, &recent).await.map(|text| gemini::ChunkAnalysis {
                 transcript: text,
                 ..Default::default()
@@ -410,6 +414,54 @@ async fn process_audio(state: &AppState, job: db::AudioJob) {
     };
 
     let start_sec = job.start_ms as f64 / 1000.0;
+
+    // 終了後の API 確定（redo）: 速報字幕を API の 1 行へ置き換える。回答・メモは作り直さない（P2）。
+    if redo {
+        let (removed, replaced, done_meeting) = {
+            let conn = state.db().lock().await;
+            let outcome = match db::replace_captions_with_api(
+                &conn,
+                job.meeting_id,
+                job.start_ms,
+                duration_ms,
+                &analysis.transcript,
+            ) {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    drop(conn);
+                    fail_job(state, &job, &err.to_string()).await;
+                    return;
+                }
+            };
+            if outcome.kept_manual {
+                tracing::info!(
+                    meeting_id = job.meeting_id,
+                    start_ms = job.start_ms,
+                    "人が直した書き起こしがあるため、API の確定で置き換えませんでした"
+                );
+            }
+            if let Err(err) = db::mark_job_done(&conn, job.id) {
+                tracing::error!("区間の完了記録に失敗しました: {err:#}");
+            }
+            let done_meeting = db::meeting_status_of(&conn, job.meeting_id).unwrap_or_default() == "done"
+                && db::unfinished_jobs(&conn, job.meeting_id).unwrap_or(1) == 0;
+            (outcome.removed, outcome.segment, done_meeting)
+        };
+        state
+            .publish(
+                job.meeting_id,
+                json!({"type":"segments_replaced","removed": removed, "segment": replaced}),
+            )
+            .await;
+        publish_jobs(state, job.meeting_id).await;
+        // 完了済みの会議で遅れて確定できた区間があれば、要約を作り直す。
+        // 進行中の終了は、ワーカーの claim_finish が全区間の完了後に要約へ進める。
+        if done_meeting {
+            spawn_summary(state.clone(), job.meeting_id);
+        }
+        return;
+    }
+
     let mut queries = analysis.search_queries.clone();
     let (segment, questions, done_meeting, notes, hint) = {
         let conn = state.db().lock().await;
@@ -717,8 +769,10 @@ async fn summarize(state: &AppState, meeting_id: i64) {
         }
     };
 
+    let redo = finish_close == "redo";
+    let gaps_note = export::gaps_note(&minutes.gaps);
     if finish_close == "plain" {
-        let summary = note_gaps(export::plain_minutes(&minutes), missing, patched);
+        let summary = note_gaps(export::plain_minutes(&minutes), missing, patched, redo, &gaps_note);
         {
             let conn = state.db().lock().await;
             if let Err(err) = db::save_summary(&conn, meeting_id, &summary, None) {
@@ -758,9 +812,9 @@ async fn summarize(state: &AppState, meeting_id: i64) {
     }
 
     let (summary, error) = match summary_result {
-        Ok(summary) => (note_gaps(summary, missing, patched), None),
+        Ok(summary) => (note_gaps(summary, missing, patched, redo, &gaps_note), None),
         Err(err) => (
-            note_gaps(export::fallback_summary(&minutes, &err), missing, patched),
+            note_gaps(export::fallback_summary(&minutes, &err), missing, patched, redo, &gaps_note),
             Some(err),
         ),
     };
@@ -1410,16 +1464,30 @@ async fn publish_done(state: &AppState, meeting_id: i64) {
         .await;
 }
 
-fn note_gaps(summary: String, missing: i64, patched: i64) -> String {
-    if missing <= 0 {
+fn note_gaps(summary: String, missing: i64, patched: i64, redo: bool, gaps_note: &str) -> String {
+    let mut notices: Vec<String> = Vec::new();
+    if missing > 0 {
+        if redo {
+            // redo: API での確定に失敗した区間は、Chrome の速報字幕のまま残している。
+            notices.push(format!(
+                "API での確定に失敗した {missing} 区間は、Chrome の速報のまま残しています（録音は残っています）"
+            ));
+        } else if patched > 0 {
+            notices.push(format!(
+                "書き起こし欠落: {missing} 区間（うち {patched} 区間は速報字幕で補いました。録音は残っています）"
+            ));
+        } else {
+            notices.push(format!("書き起こし欠落: {missing} 区間（録音は残っています）"));
+        }
+    }
+    if !gaps_note.is_empty() {
+        notices.push(gaps_note.to_string());
+    }
+    if notices.is_empty() {
         return summary;
     }
-    if patched > 0 {
-        return format!(
-            "> 書き起こし欠落: {missing} 区間（うち {patched} 区間は速報字幕で補いました。録音は残っています）\n\n{summary}"
-        );
-    }
-    format!("> 書き起こし欠落: {missing} 区間（録音は残っています）\n\n{summary}")
+    let head = notices.iter().map(|n| format!("> {n}")).collect::<Vec<_>>().join("\n");
+    format!("{head}\n\n{summary}")
 }
 
 fn summary_context(minutes: &Minutes) -> String {
@@ -1462,6 +1530,18 @@ fn summary_context(minutes: &Minutes) -> String {
         for segment in marked {
             let whole = segment.start_sec.floor() as i64;
             head.push_str(&format!("- [{:02}:{:02}] {}\n", whole / 60, whole % 60, segment.text));
+        }
+    }
+    if !minutes.gaps.is_empty() {
+        head.push_str("\n# 録音が途切れた箇所（推測で埋めないこと。前後の話がつながっていない可能性がある）\n");
+        for (at, lost, reason) in &minutes.gaps {
+            let whole = at.floor() as i64;
+            head.push_str(&format!(
+                "- [{:02}:{:02}] {}\n",
+                whole / 60,
+                whole % 60,
+                export::gap_marker(*lost, reason)
+            ));
         }
     }
     head.push_str("\n# ピン留めした資料（社内ナレッジ・顧客から受け取った資料）\n");
@@ -1581,6 +1661,10 @@ mod tests {
     }
 
     /// 模擬の Gemini / OpenAI。届いた要求の宛先とキーを記録する。
+    // AI の偽サーバを使うテストは、プロセス共通の KIKIMIMI_*_BASE 環境変数を書き換える。
+    // 並行実行で互いの接続先を奪い合わないよう、この間だけ直列化する。
+    static AI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     async fn mock_ai() -> (String, std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>) {
         use axum::http::HeaderMap;
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
@@ -1658,9 +1742,53 @@ mod tests {
         (meeting, job)
     }
 
+    /// 終了後の API 確定（#8 redo）: Chrome の速報字幕を、録音からの API 文字起こし 1 行へ
+    /// 置き換える（二重化しない）。速報は控えへ退避する。回答・メモは作り直さない。
+    #[tokio::test]
+    async fn redo_replaces_chrome_caption_without_doubling() {
+        let _env = AI_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (base, _seen) = mock_ai().await;
+        std::env::set_var("KIKIMIMI_GEMINI_BASE", format!("{base}/v1beta"));
+        let dir = std::env::temp_dir().join(format!("kikimimi-redo-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = AppState::new(db::open(&dir.join("t.sqlite")).unwrap(), dir);
+        let user = {
+            let conn = state.db().lock().await;
+            let hash = crate::accounts::hash_password("password-for-test").unwrap();
+            let user = crate::accounts::create_user(&conn, "alice", &hash).unwrap().unwrap();
+            db::patch_user_settings(&conn, user, db::SettingsPatch { api_key: Some("key-alice".into()), ..Default::default() }).unwrap();
+            user
+        };
+        let (meeting, job) = {
+            let mut conn = state.db().lock().await;
+            let meeting = db::create_meeting(&conn, user, "redo", &[]).unwrap();
+            db::set_live(&conn, meeting).unwrap();
+            db::set_speech(&conn, meeting, "chrome", false).unwrap();
+            db::save_caption(&conn, meeting, 1.0, "速報の文").unwrap();
+            let adir = state.data_dir().join("audio").join(meeting.to_string());
+            std::fs::create_dir_all(&adir).unwrap();
+            let path = adir.join("0.wav");
+            std::fs::write(&path, crate::audio::encode_wav(&[0, 0, 1, 0], 16_000)).unwrap();
+            db::enqueue_audio(&mut conn, meeting, 0, &path.display().to_string(), 15.0, false).unwrap();
+            db::prepare_finish(&conn, meeting, "api").unwrap();
+            let job = db::claim_pending(&mut conn).unwrap().unwrap();
+            (meeting, job)
+        };
+        process_audio(&state, job).await;
+        let conn = state.db().lock().await;
+        let segs = db::list_segments(&conn, meeting).unwrap();
+        assert_eq!(segs.len(), 1, "二重化せず 1 行のはず: {segs:?}");
+        assert_eq!(segs[0].text, "Gemini の書き起こし");
+        let src: String = conn.query_row("SELECT source FROM segments WHERE id=?1", [segs[0].id], |r| r.get(0)).unwrap();
+        assert_eq!(src, "api");
+        let backups: i64 = conn.query_row("SELECT COUNT(*) FROM caption_backup WHERE meeting_id=?1", [meeting], |r| r.get(0)).unwrap();
+        assert_eq!(backups, 1, "速報は控えへ退避されるはず");
+    }
+
     /// 会議の持ち主のキーだけが使われ、他人のキーや共通のキーに頼らない（#78）。
     #[tokio::test]
     async fn each_meeting_uses_its_owners_key() {
+        let _env = AI_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (base, seen) = mock_ai().await;
         std::env::set_var("KIKIMIMI_GEMINI_BASE", format!("{base}/v1beta"));
         std::env::set_var("KIKIMIMI_OPENAI_BASE", format!("{base}/v1"));

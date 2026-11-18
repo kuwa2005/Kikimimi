@@ -84,6 +84,11 @@ export async function toError(response: Response): Promise<ApiError> {
     limit = data.limit;
     retryAfter = data.retry_after;
   }
+  if (retryAfter == null) {
+    // プロキシ等が返す Retry-After ヘッダ（秒）も見る。
+    const header = Number(response.headers.get("retry-after"));
+    if (Number.isFinite(header) && header > 0) retryAfter = header;
+  }
   if (response.status === 401 && code !== "invalid_credentials") unauthenticated();
   return new ApiError(message, response.status, code, limit, retryAfter);
 }

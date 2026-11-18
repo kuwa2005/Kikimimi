@@ -298,7 +298,7 @@ function sync() {
   const canHear = mode === "cloud" || !!captionTrack();
   const shouldRun = mode !== "off" && capturing && hasEngine && canHear;
   if (mode !== "off" && capturing && !hasEngine) {
-    setState({ running: false, problem: "このブラウザは Chrome の音声認識に対応していません。デスクトップの Chrome で開いてください。" });
+    setState({ running: false, problem: "このブラウザは音声認識（速報字幕）に対応していません。Android かパソコンの Chrome でお使いください。録音は続いており、終了時に API での文字起こしも選べます。" });
   } else if (mode === "local" && capturing && !captionTrack() && !recognition) {
     setState({ problem: "音声認識に渡すマイクの音がまだありません。" });
   }

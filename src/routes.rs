@@ -78,6 +78,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/meetings/:id/finish", post(finish_meeting))
         .route("/api/meetings/:id/speech", post(set_speech))
         .route("/api/meetings/:id/captions", post(save_caption))
+        .route("/api/meetings/:id/gaps", post(record_gap))
         .route("/api/meetings/:id/cancel-finish", post(cancel_finish))
         .route("/api/meetings/:id/retry-audio", post(retry_audio))
         .route("/api/meetings/:id/give-up-retries", post(give_up_retries))
@@ -1454,6 +1455,14 @@ struct CaptionOpts {
     text: String,
 }
 
+#[derive(Deserialize)]
+struct GapOpts {
+    at_sec: f64,
+    lost_sec: f64,
+    #[serde(default)]
+    reason: String,
+}
+
 fn parse_or_empty<T: serde::de::DeserializeOwned + Default>(bytes: &Bytes) -> Result<T, AppError> {
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         return Ok(T::default());
@@ -1590,6 +1599,20 @@ async fn save_caption(
         jobs::spawn_caption_analysis(state.clone(), id);
     }
     Ok(Json(json!({"segment": segment})))
+}
+
+async fn record_gap(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+    Json(body): Json<GapOpts>,
+) -> Result<Json<Value>, AppError> {
+    owned(&state, &user, id).await?;
+    {
+        let conn = state.db().lock().await;
+        db::record_gap(&conn, id, body.at_sec, body.lost_sec, &body.reason).map_err(rejected)?;
+    }
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn cancel_finish(
