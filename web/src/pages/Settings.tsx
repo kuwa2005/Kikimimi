@@ -33,6 +33,28 @@ const KEY_FIELDS: Record<Provider, { key: string; clear: string }> = {
   anthropic: { key: "anthropic_api_key", clear: "clear_anthropic_api_key" },
 };
 
+/** 「文字起こしに使う AI」の選択肢。提供元に応じて変わり、どの提供元でも「なし」を選べる。 */
+function transcriberChoices(provider: Provider): { value: Transcriber; label: string }[] {
+  if (provider === "anthropic") {
+    return [
+      { value: "gemini", label: providerName("gemini") },
+      { value: "openai", label: providerName("openai") },
+      { value: "none", label: "なし（Chrome の音声認識だけ）" },
+    ];
+  }
+  return [
+    { value: provider as Transcriber, label: `${providerName(provider)} で文字起こし` },
+    { value: "none", label: "なし（Chrome の音声認識だけ）" },
+  ];
+}
+
+/** いま選ばれている文字起こし先。保存値を選択肢の値に正規化する。 */
+function currentTranscriber(provider: Provider, transcriber: Transcriber): Transcriber {
+  if (transcriber === "none") return "none";
+  if (provider === "anthropic") return transcriber === "openai" ? "openai" : "gemini";
+  return provider as Transcriber;
+}
+
 function formOf(settings: SettingsData): Form {
   return {
     provider: settings.provider || "gemini",
@@ -455,22 +477,30 @@ export function Settings() {
           <p className="hint">Gemini と OpenAI は文字起こしもします。Cursor は外部のアプリから呼べる文章生成の API を公開していないため、選べません。</p>
         </fieldset>
         <KeyField key={form.provider} provider={form.provider} settings={settings} onChanged={(next) => adopt(next)} />
-        {form.provider === "anthropic" ? (
-          <>
-            <fieldset className="field provider-pick">
-              <legend>文字起こしに使う AI</legend>
-              <p className="hint">Claude は音声を受け付けないため、録音の文字起こしは Gemini か OpenAI で行い、その文を Claude に渡します。</p>
-              {(["gemini", "openai"] as Transcriber[]).map((transcriber) => (
-                <label key={transcriber} className="check">
-                  <input type="radio" name="transcriber" value={transcriber} checked={form.transcriber === transcriber} onChange={() => update({ transcriber })} />
-                  {providerName(transcriber)}
-                  {settings.provider === "anthropic" && transcriber === settings.transcriber ? <span className="muted small">（使用中）</span> : null}
-                </label>
-              ))}
-              {form.transcriber !== settings.transcriber ? <p className="hint">「保存」を押すと切り替わります。</p> : null}
-            </fieldset>
-            <KeyField key={`ears-${form.transcriber}`} provider={form.transcriber} settings={settings} onChanged={(next) => adopt(next)} />
-          </>
+        <fieldset className="field provider-pick">
+          <legend>文字起こしに使う AI</legend>
+          {form.provider === "anthropic" ? (
+            <p className="hint">Claude は音声を受け付けないため、録音の文字起こしは Gemini か OpenAI で行い、その文を Claude に渡します。「なし」にすると API では文字起こしせず、Chrome の音声認識だけを使います。</p>
+          ) : (
+            <p className="hint">録音を {providerName(form.provider)} で文字起こしします。「なし」にすると API では文字起こしせず、Chrome の音声認識だけを使います（新しい会議や録音中に「APIキーで文字起こし」を選べなくなります）。</p>
+          )}
+          {transcriberChoices(form.provider).map((choice) => (
+            <label key={choice.value} className="check">
+              <input
+                type="radio"
+                name="transcriber"
+                value={choice.value}
+                checked={currentTranscriber(form.provider, form.transcriber) === choice.value}
+                onChange={() => update({ transcriber: choice.value })}
+              />
+              {choice.label}
+              {currentTranscriber(settings.provider, settings.transcriber) === choice.value ? <span className="muted small">（使用中）</span> : null}
+            </label>
+          ))}
+          {currentTranscriber(form.provider, form.transcriber) !== currentTranscriber(settings.provider, settings.transcriber) ? <p className="hint">「保存」を押すと切り替わります。</p> : null}
+        </fieldset>
+        {form.provider === "anthropic" && form.transcriber !== "none" ? (
+          <KeyField key={`ears-${form.transcriber}`} provider={(form.transcriber === "openai" ? "openai" : "gemini") as Provider} settings={settings} onChanged={(next) => adopt(next)} />
         ) : null}
         <p className="muted small" aria-live="polite">
           {modelLine(settings, form)}

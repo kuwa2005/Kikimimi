@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { Route } from "../lib/router";
 import { useStore } from "../lib/store";
+import { pref, savePref, PREF_SIDEBAR_COLLAPSED } from "../lib/prefs";
 import { recorderState } from "../recorder/recorder";
 import { session } from "../state/session";
 import { localHash } from "../state/offline";
@@ -18,28 +19,57 @@ const NAV: { hash: string; label: string; match: Route["name"] }[] = [
 export function Shell({ route, children, onCommand }: { route: Route; children: ReactNode; onCommand: () => void }) {
   const rec = useStore(recorderState);
   const { user, offline } = useStore(session);
-  const unsent = rec.queueLength + rec.parked + rec.captionsPending;
+  // 送信待ちは録音中に 0↔1 を繰り返すため、少し続いたときだけ出す（最上部のバーが上下に揺れないように）。
+  const rawUnsent = rec.queueLength + rec.parked + rec.captionsPending;
+  const pending = rawUnsent > 0;
+  const [showUnsent, setShowUnsent] = useState(false);
+  useEffect(() => {
+    if (!pending) {
+      setShowUnsent(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowUnsent(true), 2500);
+    return () => clearTimeout(timer);
+  }, [pending]);
+  const unsent = showUnsent ? rawUnsent : 0;
+  const [collapsed, setCollapsed] = useState(() => pref(PREF_SIDEBAR_COLLAPSED) === "1");
+  const toggleSidebar = () => {
+    setCollapsed((on) => {
+      savePref(PREF_SIDEBAR_COLLAPSED, on ? "0" : "1");
+      return !on;
+    });
+  };
   const choice = useStore(theme);
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
   return (
-    <div className="app">
+    <div className={`app ${collapsed ? "side-collapsed" : ""}`}>
+      {collapsed ? (
+        <button type="button" className="side-reopen" onClick={toggleSidebar} aria-label="メニューを開く" title="メニューを開く">
+          ☰
+        </button>
+      ) : null}
       <aside className="side" aria-label="メニュー">
-        <a
-          className="brand"
-          href="#/"
-          title="ホームへ"
-          aria-label="会議支援（ホームへ）"
-          onClick={() => {
-            // ホームを開いているときに押したら、一覧を読み直して先頭へ戻る。
-            if (location.hash === "#/" || location.hash === "") {
-              window.dispatchEvent(new Event("kikimimi:home"));
-              document.getElementById("main")?.scrollTo({ top: 0 });
-              window.scrollTo({ top: 0 });
-            }
-          }}
-        >
-          会議支援<small>録音は解析を待たない</small>
-        </a>
+        <div className="side-top">
+          <a
+            className="brand"
+            href="#/"
+            title="ホームへ"
+            aria-label="会議支援（ホームへ）"
+            onClick={() => {
+              // ホームを開いているときに押したら、一覧を読み直して先頭へ戻る。
+              if (location.hash === "#/" || location.hash === "") {
+                window.dispatchEvent(new Event("kikimimi:home"));
+                document.getElementById("main")?.scrollTo({ top: 0 });
+                window.scrollTo({ top: 0 });
+              }
+            }}
+          >
+            会議支援<small>録音は解析を待たない</small>
+          </a>
+          <button type="button" className="collapse-btn" onClick={toggleSidebar} aria-label="メニューを畳む" title="メニューを畳む">
+            «
+          </button>
+        </div>
         <button type="button" className="find" onClick={onCommand} aria-keyshortcuts={mac ? "Meta+K" : "Control+K"}>
           <span>操作を探す</span>
           <kbd>{mac ? "⌘K" : "Ctrl+K"}</kbd>

@@ -44,9 +44,15 @@ export function keySet(settings: Settings, provider: Settings["provider"]): bool
   return !!settings.api_key_set;
 }
 
-/** 録音を文字にするキーがあるか。Claude のときは文字起こし用の提供元を見る。 */
+/** API 文字起こしを使わない設定か（「なし」）。 */
+export function transcribeOff(settings: Settings): boolean {
+  return settings.transcriber === "none";
+}
+
+/** 録音を文字にするキーがあるか。「なし」のときは常に不可。Claude のときは文字起こし用の提供元を見る。 */
 export function transcribeReady(settings: Settings): boolean {
-  const ears = settings.provider === "anthropic" ? settings.transcriber || "gemini" : settings.provider;
+  if (transcribeOff(settings)) return false;
+  const ears = settings.provider === "anthropic" ? (settings.transcriber === "openai" ? "openai" : "gemini") : settings.provider;
   return keySet(settings, ears);
 }
 
@@ -62,7 +68,7 @@ export function keyReady(settings: Settings): boolean {
 
 /** 足りないキーの提供元名（会議の開始前の案内に使う）。 */
 export function missingKeyName(settings: Settings): string {
-  if (settings.provider === "anthropic" && keySet(settings, "anthropic")) return `文字起こしに使う ${providerName(settings.transcriber || "gemini")}`;
+  if (settings.provider === "anthropic" && keySet(settings, "anthropic")) return `文字起こしに使う ${providerName(settings.transcriber === "openai" ? "openai" : "gemini")}`;
   return providerName(settings.provider);
 }
 
@@ -286,17 +292,20 @@ export async function resumeMeeting(id: number) {
   setDetail(detail);
 }
 
-async function finishKeys(): Promise<{ transcribe: boolean; chat: boolean }> {
+async function finishKeys(): Promise<{ transcribe: boolean; chat: boolean; apiOff: boolean }> {
   const settings = await api<Settings>("/api/settings");
-  return { transcribe: transcribeReady(settings), chat: chatReady(settings) };
+  return { transcribe: transcribeReady(settings), chat: chatReady(settings), apiOff: transcribeOff(settings) };
 }
 
-function finishOptions(keys: { transcribe: boolean; chat: boolean }): { value: string; label: string }[] {
-  return [
-    { value: "api", label: keys.transcribe ? "録音から API で文字起こしを確定し、要約する" : "録音から API で確定する（文字起こし用の APIキーが必要）" },
-    { value: "chrome", label: keys.chat ? "いまの書き起こしを API で議事録にまとめる" : "書き起こしを API でまとめる（まとめる用の APIキーが必要）" },
-    { value: "plain", label: "API を使わず、書き起こしを議事録にする" },
-  ];
+function finishOptions(keys: { transcribe: boolean; chat: boolean; apiOff: boolean }): { value: string; label: string }[] {
+  const options: { value: string; label: string }[] = [];
+  // 文字起こしに使う AI が「なし」のときは、録音から API で確定する選択肢を出さない。
+  if (!keys.apiOff) {
+    options.push({ value: "api", label: keys.transcribe ? "録音から API で文字起こしを確定し、要約する" : "録音から API で確定する（文字起こし用の APIキーが必要）" });
+  }
+  options.push({ value: "chrome", label: keys.chat ? "いまの書き起こしを API で議事録にまとめる" : "書き起こしを API でまとめる（まとめる用の APIキーが必要）" });
+  options.push({ value: "plain", label: "API を使わず、書き起こしを議事録にする" });
+  return options;
 }
 
 function defaultClose(keys: { transcribe: boolean; chat: boolean }): string {

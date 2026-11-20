@@ -3,7 +3,7 @@ import { api, errorMessage, request } from "../api/client";
 import type { Evidence, ExportScope, MeetingDetail, Segment } from "../api/types";
 import { fmt } from "../lib/format";
 import { useMediaQuery } from "../lib/media";
-import { pref, PREF_PANEL, savePref } from "../lib/prefs";
+import { pref, PREF_PANEL, PREF_SHOW_ASSIST, savePref } from "../lib/prefs";
 import { useStore } from "../lib/store";
 import { localSeconds, recorderState, recordingHere, saveCaption } from "../recorder/recorder";
 import { copyText, exportMarkdown, finishMeeting, pauseMeeting, resumeMeeting } from "../state/actions";
@@ -16,7 +16,7 @@ import { markdown } from "../lib/markdown";
 import { MeetingHead } from "../components/MeetingHead";
 import { Notices } from "../components/Notices";
 import { Transcript } from "../components/Transcript";
-import { addQuestion, AgendaProgress, QuestionList, useLiveSeconds } from "../components/Questions";
+import { addQuestion, AgendaOrderToggle, AgendaProgress, QuestionList, useLiveSeconds } from "../components/Questions";
 import { KnowledgePanel } from "../components/Knowledge";
 import { TabPanel, Tabs } from "../components/Tabs";
 import { AssistBar, markedIds, NotesPanel, TopicHits } from "../components/Assist";
@@ -143,6 +143,11 @@ function LiveView({ detail }: { detail: MeetingDetail }) {
   const wide = useMediaQuery("(min-width: 1380px)");
   const mid = useMediaQuery("(min-width: 960px)");
   const [panelOpen, setPanelOpen] = useState(() => pref(PREF_PANEL, "1") === "1");
+  const [showAssist, setShowAssist] = useState(() => pref(PREF_SHOW_ASSIST, "1") === "1");
+  const toggleAssist = (on: boolean) => {
+    setShowAssist(on);
+    savePref(PREF_SHOW_ASSIST, on ? "1" : "0");
+  };
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState("transcript");
   const [flashId, setFlashId] = useState<number | null>(null);
@@ -228,6 +233,7 @@ function LiveView({ detail }: { detail: MeetingDetail }) {
   // アジェンダの下に「いまの話題の資料」を出す（資料パネルを開いているときは出さない）。
   const questions = (
     <>
+      {detail.questions.length ? <AgendaOrderToggle /> : null}
       <AgendaProgress detail={detail} now={now} live />
       <QuestionList meetingId={meetingId} questions={detail.questions} activeId={detail.meeting.active_question_id} onJump={onJump} live now={now} />
       {wide && panelOpen ? null : <TopicHits hits={detail.hits} onOpenAll={openKnowledge} />}
@@ -246,7 +252,19 @@ function LiveView({ detail }: { detail: MeetingDetail }) {
   };
 
   let body;
-  if (wide) {
+  if (!showAssist) {
+    body = (
+      <div className="live-grid solo">
+        <section className="pane" aria-labelledby="h-transcript">
+          <div className="pane-head">
+            <h2 id="h-transcript">書き起こし</h2>
+            <SegSearch id="seg-search" value={query} onChange={setQuery} />
+          </div>
+          {transcript}
+        </section>
+      </div>
+    );
+  } else if (wide) {
     body = (
       <div className={`live-grid ${panelOpen ? "with-panel" : ""}`}>
         <section className="pane" aria-labelledby="h-transcript">
@@ -356,10 +374,14 @@ function LiveView({ detail }: { detail: MeetingDetail }) {
         detail={detail}
         extra={
           <>
+            <label className="check assist-toggle" title="アジェンダ・関連ナレッジの表示を切り替えます">
+              <input type="checkbox" checked={showAssist} onChange={(event) => toggleAssist(event.target.checked)} />
+              アジェンダ・ナレッジを表示
+            </label>
             <button className="btn ghost" type="button" onClick={() => setImporting(true)} title="ボイスレコーダーの音声や、文字起こし済みのテキストを足します">
               取り込む…
             </button>
-            {wide ? (
+            {wide && showAssist ? (
               <button className="btn ghost" type="button" onClick={togglePanel} aria-expanded={panelOpen} aria-controls="knowledge-panel">
                 {panelOpen ? "資料パネルを閉じる" : newHits ? `資料パネルを開く（新着 ${newHits}）` : "資料パネルを開く"}
               </button>

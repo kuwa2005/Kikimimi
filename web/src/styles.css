@@ -205,6 +205,18 @@ label.check input { width: auto; min-height: 0; margin-top: 5px; }
 .live-page .title-line h1 { font-size: 1.4rem; }
 .theme-pick select { min-height: 32px; padding: 2px 8px; font-size: 0.8rem; background: rgba(255,255,255,0.08); color: var(--side-ink); border-color: rgba(255,255,255,0.2); }
 .theme-pick select option { color: #1c1914; }
+.side-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.collapse-btn {
+  background: rgba(255, 255, 255, 0.08); color: var(--side-ink);
+  border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px;
+  cursor: pointer; padding: 2px 9px; font-size: 1rem; line-height: 1.5; flex: none;
+}
+.collapse-btn:hover { background: rgba(255, 255, 255, 0.16); }
+.side-reopen {
+  display: none; background: var(--side); color: var(--side-ink);
+  border: 1px solid var(--line); border-radius: 8px; cursor: pointer;
+  padding: 5px 11px; font-size: 1.05rem; line-height: 1;
+}
 
 .main {
   min-width: 0;
@@ -281,7 +293,12 @@ label.check input { width: auto; min-height: 0; margin-top: 5px; }
 .empty-state ol { padding-left: 1.4em; margin: 0 0 16px; }
 
 /* ---- 会議の準備 ---- */
-.form { max-width: 820px; }
+.form { max-width: 1280px; }
+.form-top { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 20px; }
+.btn.big { font-size: 1.05rem; padding: 12px 22px; }
+.form-cols { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0 36px; align-items: start; }
+@media (min-width: 1080px) { .form-cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.assist-toggle { font-size: 0.85rem; white-space: nowrap; }
 .narrow-form { max-width: 460px; }
 .q-row { display: grid; grid-template-columns: 4.5em minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-bottom: 8px; }
 .q-label { margin: 0; font-weight: 400; color: var(--muted); font-size: 0.85rem; }
@@ -317,6 +334,7 @@ label.check input { width: auto; min-height: 0; margin-top: 5px; }
 }
 .live-grid.with-panel { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(280px, 0.9fr); }
 .live-grid.two { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
+.live-grid.solo { grid-template-columns: minmax(0, 1fr); }
 .pane {
   background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
   display: flex; flex-direction: column; min-height: 0; min-width: 0;
@@ -449,10 +467,16 @@ dialog.command-menu {
 /* サイドが列のときだけ、その列の背景を下まで敷く。上に畳んだあとに残すと、本文の左が暗い帯になる。 */
 @media (min-width: 1101px) {
   .app { background: linear-gradient(to right, var(--side) 224px, transparent 224px); }
+  /* 左メニューを畳む。幅を 0 にして本文を広げ、開き直すボタンだけ残す。 */
+  .app.side-collapsed { grid-template-columns: 0 minmax(0, 1fr); background: var(--bg); }
+  .app.side-collapsed .side { visibility: hidden; opacity: 0; pointer-events: none; }
+  .app.side-collapsed .side-reopen { display: inline-flex; position: fixed; top: 12px; left: 12px; z-index: 50; }
 }
 
 @media (max-width: 1100px) {
   .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); background: var(--bg); }
+  .collapse-btn { display: none; }
+  .side-top { align-items: center; }
   .side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 10px 14px; gap: 8px 10px; }
   .brand { order: 1; }
   .brand small { display: none; }

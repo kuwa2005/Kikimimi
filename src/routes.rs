@@ -942,8 +942,8 @@ fn settings_json(
         "openai_key_set": !settings.openai_api_key.is_empty(),
         "anthropic_key_set": !settings.anthropic_api_key.is_empty(),
         "anthropic_model": settings.anthropic_model,
-        // Claude を選んだときに文字起こしを任せる提供元（選んでいなくても保存値を返す）。
-        "transcriber": if settings.transcriber == "openai" { "openai" } else { "gemini" },
+        // 文字起こしに使う提供元。"none" は API 文字起こしを使わない。選んでいなければ "gemini" を返す。
+        "transcriber": if settings.transcriber == "openai" { "openai" } else if settings.transcriber == "none" { "none" } else { "gemini" },
         // リアルタイム文字起こし（#104）: プランで使えるか、サーバ認識（Google に送る）を運用者が許可しているか。
         "realtime_captions": settings.realtime_captions,
         "realtime_allowed": accounts::plan_for_user(conn, user_id).map(|plan| plan.limits.realtime_captions).unwrap_or(false),

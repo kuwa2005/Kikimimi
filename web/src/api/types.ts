@@ -25,8 +25,8 @@ export type Upload = { name: string; bytes: number; uploaded_at: string };
 
 export type Provider = "gemini" | "openai" | "anthropic";
 
-/** 文字起こしができる提供元（Claude は音声を受け付けない）。 */
-export type Transcriber = "gemini" | "openai";
+/** 文字起こしに使う提供元。"none" は API 文字起こしを使わない（Chrome の音声認識だけ）。 */
+export type Transcriber = "gemini" | "openai" | "none";
 
 export type Settings = {
   provider: Provider;

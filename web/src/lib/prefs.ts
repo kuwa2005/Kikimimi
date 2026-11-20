@@ -62,3 +62,6 @@ export function clearSessionData() {
 
 export const PREF_NEWEST_FIRST = "kikimimi.newestFirst";
 export const PREF_ENHANCE = "kikimimi.enhance";
+export const PREF_SHOW_ASSIST = "kikimimi.showAssist";
+export const PREF_AGENDA_NEWEST = "kikimimi.agendaNewest";
+export const PREF_SIDEBAR_COLLAPSED = "kikimimi.sidebarCollapsed";

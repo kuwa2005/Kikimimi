@@ -23,7 +23,7 @@ function fromDetail(detail: MeetingDetail): Form {
     questions: questions.length ? questions : [""],
     minutes: detail.questions.length ? detail.questions.map((q) => (q.minutes ? String(q.minutes) : "")) : [""],
     folderId: detail.meeting.folder_id != null ? String(detail.meeting.folder_id) : "",
-    speech: detail.meeting.speech || "api",
+    speech: detail.meeting.speech || "chrome",
     transcriptOnly: !!detail.meeting.transcript_only,
   };
 }
@@ -43,13 +43,18 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
   const testing = rec.streamOpen && !rec.capturing;
   const problem = secureContextProblem();
   const speechTouched = useRef(false);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  // 文字起こしに使う AI が「なし」なら、API キーでの文字起こしは選べない。
+  const apiTranscribe = !settings || settings.transcriber !== "none";
 
   useEffect(() => saveForm(key, form), [key, form]);
   useEffect(() => {
     let alive = true;
     api<Settings>("/api/settings")
       .then((settings) => {
-        if (!alive || keyReady(settings) || speechTouched.current) return;
+        if (!alive) return;
+        setSettings(settings);
+        if (keyReady(settings) || speechTouched.current) return;
         setForm((current) => (current.speech === "api" ? { ...current, speech: "chrome" } : current));
       })
       .catch(() => {});
@@ -57,6 +62,9 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
       alive = false;
     };
   }, [key]);
+  useEffect(() => {
+    if (!apiTranscribe) setForm((current) => (current.speech === "api" ? { ...current, speech: "chrome" } : current));
+  }, [apiTranscribe]);
 
   useEffect(() => {
     api<{ templates: Template[] }>("/api/templates")
@@ -166,6 +174,16 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
           void begin();
         }}
       >
+        <div className="form-top">
+          <button className="btn danger big" type="submit" disabled={!!busyName}>
+            {busyName === "begin" ? "開始しています…" : "● 会議開始（録音開始）"}
+          </button>
+          <button className="btn primary" type="button" disabled={!!busyName} onClick={() => void beginPaused()} title="会議を始めますが、録音はしません。あとで「再開」か「取り込む…」で録音を足せます">
+            {busyName === "begin-paused" ? "開始しています…" : "会議開始（録音一時停止）"}
+          </button>
+        </div>
+        <div className="form-cols">
+          <div className="form-col">
         <div className="field">
           <label htmlFor={`${prefix}-title`}>会議タイトル</label>
           <input id={`${prefix}-title`} type="text" value={form.title} placeholder={meetingId == null ? "未入力なら現在日時" : ""} onChange={(event) => update({ title: event.target.value })} />
@@ -266,20 +284,10 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
             議題を追加
           </button>
         </fieldset>
+          </div>
+          <div className="form-col">
         <fieldset className="field">
           <legend>文字起こし</legend>
-          <label className="check">
-            <input
-              type="radio"
-              name={`${prefix}-speech`}
-              checked={form.speech === "api"}
-              onChange={() => {
-                speechTouched.current = true;
-                update({ speech: "api" });
-              }}
-            />
-            APIキーで文字起こしする
-          </label>
           <label className="check">
             <input
               type="radio"
@@ -292,6 +300,20 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
             />
             Chrome の音声認識（APIキー不要）
           </label>
+          {apiTranscribe ? (
+            <label className="check">
+              <input
+                type="radio"
+                name={`${prefix}-speech`}
+                checked={form.speech === "api"}
+                onChange={() => {
+                  speechTouched.current = true;
+                  update({ speech: "api" });
+                }}
+              />
+              APIキーで文字起こしする
+            </label>
+          ) : null}
           <label className="check">
             <input
               type="radio"
@@ -345,6 +367,8 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
             オンライン会議の相手の声も録る（会議を開いているタブの音声を共有します）
           </label>
         </fieldset>
+          </div>
+        </div>
         <div className="actions">
           <button className="btn" type="button" onClick={() => void saveTemplate().catch((err) => notify(errorMessage(err), "error"))}>
             テンプレートとして保存
@@ -354,12 +378,6 @@ export function MeetingForm({ detail }: { detail: MeetingDetail | null }) {
           </button>
           <button className="btn" type="button" disabled={!!busyName} onClick={() => void fromFile()} title="ボイスレコーダーの音声や、文字起こし済みのテキストから議事録を作ります">
             録音せずにファイルから作る
-          </button>
-          <button className="btn primary" type="button" disabled={!!busyName} onClick={() => void beginPaused()} title="会議を始めますが、録音はしません。あとで「再開」か「取り込む…」で録音を足せます">
-            {busyName === "begin-paused" ? "開始しています…" : "会議開始（録音一時停止）"}
-          </button>
-          <button className="btn danger" type="submit" disabled={!!busyName}>
-            {busyName === "begin" ? "開始しています…" : "会議開始（録音開始）"}
           </button>
         </div>
       </form>

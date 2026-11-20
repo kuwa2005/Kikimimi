@@ -18,7 +18,7 @@ export type MeetingForm = {
 
 export function emptyForm(): MeetingForm {
   // ホームでフォルダを開いていたら、そのフォルダを最初から選んでおく。
-  return { title: "", participants: "", templateId: "", questions: [""], folderId: homeFolder(), speech: "api", transcriptOnly: false };
+  return { title: "", participants: "", templateId: "", questions: [""], folderId: homeFolder(), speech: "chrome", transcriptOnly: false };
 }
 
 const HOME_FOLDER = "kikimimi.homeFolder";
@@ -44,7 +44,7 @@ export function formKey(meetingId: number | null): string {
 export function loadForm(key: string): MeetingForm | null {
   const saved = sessionGet<MeetingForm>(key);
   if (!saved || !Array.isArray(saved.questions)) return null;
-  return { ...emptyForm(), ...saved, speech: saved.speech || "api", transcriptOnly: !!saved.transcriptOnly };
+  return { ...emptyForm(), ...saved, speech: saved.speech || "chrome", transcriptOnly: !!saved.transcriptOnly };
 }
 
 export function saveForm(key: string, form: MeetingForm) {

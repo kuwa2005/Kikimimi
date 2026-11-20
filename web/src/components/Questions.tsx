@@ -2,6 +2,8 @@ import { memo, useEffect, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import type { Evidence, MeetingDetail, Question } from "../api/types";
 import { fmt } from "../lib/format";
+import { createStore, useStore } from "../lib/store";
+import { pref, PREF_AGENDA_NEWEST, savePref } from "../lib/prefs";
 import { localSeconds, recordingHere } from "../recorder/recorder";
 import { openDialog } from "../state/dialog";
 import { patchDetail } from "../state/meeting";
@@ -9,6 +11,32 @@ import { notify } from "../state/notices";
 
 // アジェンダ（#99）。内部の名前は questions のまま、画面では「アジェンダ」「議題」と呼ぶ。
 const STATUS: Record<Question["status"], string> = { open: "未着手", draft: "途中", sufficient: "完了", skipped: "今回は扱わない" };
+
+/** 新しい議題を上に出すか（会議中に切り替えられる。端末ごとに覚える）。 */
+export const agendaNewestFirst = createStore<boolean>(pref(PREF_AGENDA_NEWEST) === "1");
+
+export function setAgendaNewestFirst(value: boolean) {
+  savePref(PREF_AGENDA_NEWEST, value ? "1" : "0");
+  agendaNewestFirst.set(value);
+}
+
+/** アジェンダの並び順の切り替え。書き起こしの並び替えと同じ使い勝手。 */
+export function AgendaOrderToggle() {
+  const top = useStore(agendaNewestFirst);
+  return (
+    <div className="transcript-tools">
+      <button
+        className="btn small ghost"
+        type="button"
+        aria-pressed={top}
+        onClick={() => setAgendaNewestFirst(!top)}
+        title="アジェンダ（議題）の並び順を切り替えます"
+      >
+        {top ? "↑ 新しい議題が上（切り替え）" : "↓ 新しい議題が下（切り替え）"}
+      </button>
+    </div>
+  );
+}
 
 async function patch(meetingId: number, id: number, body: Record<string, unknown>) {
   const result = await api<{ questions: Question[] }>(`/api/meetings/${meetingId}/questions/${id}`, { method: "PATCH", body });
@@ -284,14 +312,16 @@ export const QuestionList = memo(function QuestionList({
   live?: boolean;
   now?: number;
 }) {
+  const newest = useStore(agendaNewestFirst);
   if (!questions.length)
     return (
       <div className="empty">
         アジェンダはまだありません。「＋ 追加」で議題を足せます。話の流れから AI が確かめるべき事項を足していきます（全文の要約は作ります）。
       </div>
     );
-  // 「今回は扱わない」にしたものは下にまとめる。
-  const asking = questions.filter((q) => q.status !== "skipped");
+  // 「今回は扱わない」にしたものは下にまとめる。新しい議題を上にする設定なら、扱う議題だけ並びを反転する。
+  const open = questions.filter((q) => q.status !== "skipped");
+  const asking = newest ? [...open].reverse() : open;
   const skipped = questions.filter((q) => q.status === "skipped");
   const card = (question: Question, active: boolean) => (
     <QuestionCard

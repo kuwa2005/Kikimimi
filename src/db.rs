@@ -903,9 +903,12 @@ impl Settings {
         self.provider == "anthropic"
     }
 
-    /// 文字起こしに使う提供元。Claude のときは transcriber、それ以外は provider と同じ。
+    /// 文字起こしに使う提供元。"none" は API 文字起こしを使わない（Chrome の音声認識だけ）。
+    /// Claude のときは transcriber、それ以外は provider と同じ。
     pub fn transcribe_provider(&self) -> &str {
-        if self.uses_anthropic() {
+        if self.transcriber == "none" {
+            "none"
+        } else if self.uses_anthropic() {
             if self.transcriber == "openai" { "openai" } else { "gemini" }
         } else if self.uses_openai() {
             "openai"
@@ -914,9 +917,10 @@ impl Settings {
         }
     }
 
-    /// 録音を文字にするキーがあるか。Claude のときは文字起こし用の提供元を見る。
+    /// 録音を文字にするキーがあるか。"none"（API 文字起こしを使わない）のときは常に無い。
     pub fn has_transcribe_key(&self) -> bool {
         match self.transcribe_provider() {
+            "none" => false,
             "openai" => !self.openai_api_key.is_empty(),
             _ => !self.api_key.is_empty(),
         }
@@ -1344,7 +1348,8 @@ fn apply_patch(current: &mut Settings, patch: SettingsPatch) {
         current.anthropic_model = model.trim().to_string();
     }
     if let Some(transcriber) = patch.transcriber {
-        if matches!(transcriber.as_str(), "gemini" | "openai") {
+        // "none" は API 文字起こしを使わない。"" は提供元まかせ（既定）。
+        if matches!(transcriber.as_str(), "gemini" | "openai" | "none" | "") {
             current.transcriber = transcriber;
         }
     }
@@ -3559,6 +3564,23 @@ mod tests {
 
     fn job_status(conn: &Connection, meeting_id: i64) -> String {
         conn.query_row("SELECT status FROM audio_jobs WHERE meeting_id=?1 ORDER BY id LIMIT 1", [meeting_id], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn transcriber_none_disables_api_transcription() {
+        // どの提供元でも「なし」なら、API 文字起こしのキーは無いものとして扱う。
+        let none = Settings { provider: "gemini".into(), api_key: "k".into(), transcriber: "none".into(), ..Default::default() };
+        assert_eq!(none.transcribe_provider(), "none");
+        assert!(!none.has_transcribe_key());
+        // まとめ（要約・回答）用のキーは「なし」の影響を受けない。
+        assert!(none.has_chat_key());
+        // 「なし」でなければ、キーがある提供元で文字起こしできる。
+        let on = Settings { provider: "gemini".into(), api_key: "k".into(), ..Default::default() };
+        assert_eq!(on.transcribe_provider(), "gemini");
+        assert!(on.has_transcribe_key());
+        // Claude で文字起こしを openai にしていても、「なし」なら無効。
+        let claude_none = Settings { provider: "anthropic".into(), openai_api_key: "k".into(), transcriber: "none".into(), ..Default::default() };
+        assert!(!claude_none.has_transcribe_key());
     }
 
     fn backup_count(conn: &Connection, meeting_id: i64) -> i64 {
