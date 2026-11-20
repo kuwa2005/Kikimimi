@@ -1037,10 +1037,10 @@ async fn put_settings(
             _ => return Err(bad("リアルタイム文字起こしは off / local / cloud のどれかです")),
         }
     }
-    // Claude は音声を受け付けないので、文字起こしは Gemini か OpenAI に任せる。
+    // 文字起こしに使う AI。"none" は API 文字起こしを使わない（Chrome の音声認識だけ）。"" は提供元まかせ。
     if let Some(transcriber) = body.transcriber.as_deref() {
-        if !matches!(transcriber, "gemini" | "openai") {
-            return Err(bad("文字起こしに使う AI は gemini か openai です"));
+        if !matches!(transcriber, "gemini" | "openai" | "none" | "") {
+            return Err(bad("文字起こしに使う AI は gemini / openai / なし のどれかです"));
         }
     }
     let typed = |value: &Option<String>| value.as_ref().is_some_and(|key| !key.trim().is_empty());
