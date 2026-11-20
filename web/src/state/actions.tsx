@@ -305,6 +305,8 @@ function finishOptions(keys: { transcribe: boolean; chat: boolean; apiOff: boole
   }
   options.push({ value: "chrome", label: keys.chat ? "いまの書き起こしを API で議事録にまとめる" : "書き起こしを API でまとめる（まとめる用の APIキーが必要）" });
   options.push({ value: "plain", label: "API を使わず、書き起こしを議事録にする" });
+  // 一番下に「何も保存しない」を置く。選んだら、消える前にもう一度確かめる（deleteMeeting が再確認する）。
+  options.push({ value: "discard", label: "何も保存せず終了する（録音・議事録を残さない）" });
   return options;
 }
 
@@ -355,6 +357,12 @@ export async function finishMeeting(id: number, reason?: string) {
     danger: true,
   });
   if (!choice) return;
+  if (choice.close === "discard") {
+    // 何も保存せず終了する。消える前に、deleteMeeting がもう一度確認する。
+    const meeting = current && current.meeting.id === id ? current.meeting : (await api<MeetingDetail>(`/api/meetings/${id}`)).meeting;
+    await deleteMeeting(meeting);
+    return;
+  }
   const close = choice.close === "chrome" && !keys.chat ? "plain" : choice.close;
   if (choice.close === "api" && !keys.transcribe) {
     notify("音声認識の確定には、文字起こし用のAPIキーが必要です。", "warn");
