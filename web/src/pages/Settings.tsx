@@ -477,7 +477,7 @@ export function Settings() {
           <p className="hint">Gemini と OpenAI は文字起こしもします。Cursor は外部のアプリから呼べる文章生成の API を公開していないため、選べません。</p>
         </fieldset>
         <KeyField key={form.provider} provider={form.provider} settings={settings} onChanged={(next) => adopt(next)} />
-        <fieldset className="field provider-pick">
+        <fieldset className="field provider-pick transcriber-pick">
           <legend>文字起こしに使う AI</legend>
           {form.provider === "anthropic" ? (
             <p className="hint">Claude は音声を受け付けないため、録音の文字起こしは Gemini か OpenAI で行い、その文を Claude に渡します。「なし」にすると API では文字起こしせず、Chrome の音声認識だけを使います。</p>

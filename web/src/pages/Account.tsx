@@ -109,13 +109,16 @@ export function Account() {
           <p className="muted">読み込み中</p>
         )}
         <div className="note">
-          <p>
-            このサービスの Free プランと、Gemini / OpenAI の API 料金・利用枠は別です。登録した自分のキーの契約によっては、提供元の料金が発生します。
-          </p>
           <p className="small">
             ここに出しているのはこのサービスの上限と利用量です。Gemini / OpenAI 側の残高や枠は、それぞれの管理画面で確認してください。
           </p>
-          {account?.note ? <p className="small">{account.note}</p> : null}
+          {account?.note ? (
+            <p className="small">{account.note}</p>
+          ) : (
+            <p className="small">
+              このサービスの Free プランと、Gemini / OpenAI の API 料金・利用枠は別です。登録した自分のキーの契約によっては、提供元の料金が発生します。
+            </p>
+          )}
         </div>
       </section>
       <section className="panel settings-section" aria-labelledby="sec-password">
