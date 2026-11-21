@@ -474,16 +474,11 @@ export function Settings() {
             </label>
           ))}
           {form.provider !== settings.provider ? <p className="hint">「保存」を押すと切り替わります。</p> : null}
-          <p className="hint">Gemini と OpenAI は文字起こしもします。Cursor は外部のアプリから呼べる文章生成の API を公開していないため、選べません。</p>
+          <p className="hint">回答候補づくりと議事録の要約に使う AI です。Claude を選んだときは音声を受け付けないため、録音の文字起こしは下の「文字起こしに使う AI」で Gemini か OpenAI を選びます。</p>
         </fieldset>
         <KeyField key={form.provider} provider={form.provider} settings={settings} onChanged={(next) => adopt(next)} />
         <fieldset className="field provider-pick transcriber-pick">
           <legend>文字起こしに使う AI</legend>
-          {form.provider === "anthropic" ? (
-            <p className="hint">Claude は音声を受け付けないため、録音の文字起こしは Gemini か OpenAI で行い、その文を Claude に渡します。「なし」にすると API では文字起こしせず、Chrome の音声認識だけを使います。</p>
-          ) : (
-            <p className="hint">録音を {providerName(form.provider)} で文字起こしします。「なし」にすると API では文字起こしせず、Chrome の音声認識だけを使います（新しい会議や録音中に「APIキーで文字起こし」を選べなくなります）。</p>
-          )}
           {transcriberChoices(form.provider).map((choice) => (
             <label key={choice.value} className="check">
               <input
@@ -498,6 +493,11 @@ export function Settings() {
             </label>
           ))}
           {currentTranscriber(form.provider, form.transcriber) !== currentTranscriber(settings.provider, settings.transcriber) ? <p className="hint">「保存」を押すと切り替わります。</p> : null}
+          {form.provider === "anthropic" ? (
+            <p className="hint">Claude は音声を受け付けないため、録音の文字起こしは Gemini か OpenAI で行い、その文を Claude に渡します。「なし」にすると API では文字起こしせず、Chrome の音声認識だけを使います。</p>
+          ) : (
+            <p className="hint">録音を {providerName(form.provider)} で文字起こしします。「なし」にすると API では文字起こしせず、Chrome の音声認識だけを使います（新しい会議や録音中に「APIキーで文字起こし」を選べなくなります）。</p>
+          )}
         </fieldset>
         {form.provider === "anthropic" && form.transcriber !== "none" ? (
           <KeyField key={`ears-${form.transcriber}`} provider={(form.transcriber === "openai" ? "openai" : "gemini") as Provider} settings={settings} onChanged={(next) => adopt(next)} />

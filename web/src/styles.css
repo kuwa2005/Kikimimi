@@ -414,10 +414,13 @@ pre.preview {
 
 /* ---- 設定（#65） ---- */
 .settings-page { max-width: 980px; }
-.settings-section { margin-bottom: 16px; }
-.settings-section > h2 { margin-bottom: 12px; }
+.settings-section { margin-bottom: 20px; }
+.settings-section > h2 { margin-bottom: 14px; }
+/* サブグループの見出し（回答候補・要約／文字起こし／速報字幕）を本文色で少し強め、グループの区切りを明確にする。 */
+.settings-page .provider-pick > legend { font-size: 0.95rem; color: var(--ink); margin-bottom: 10px; }
+.settings-page .provider-pick label.check { margin: 9px 0; }
 /* 「文字起こしに使う AI」は、鍵の登録ボタンの直下に詰まらないよう、薄い区切りで一段落とす。 */
-.transcriber-pick { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+.transcriber-pick { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
 .key-box { margin-top: 8px; }
 .index-box { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
 .index-box p { margin: 0; }
