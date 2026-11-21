@@ -486,6 +486,8 @@ dialog.command-menu {
   .collapse-btn { display: none; }
   /* タッチ端末にキーボードショートカットの表示は不要。ボタン自体は残る。 */
   .find kbd { display: none; }
+  /* モバイルは右下の「すぐ録音」FAB が常時出るので、見出しの同じボタンは重複。隠す（＋新しい会議は残す）。 */
+  .page-head .rec-start { display: none; }
   .side-top { align-items: center; }
   .side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 10px 14px; gap: 8px 10px; }
   .brand { order: 1; }
