@@ -649,4 +649,6 @@ dialog.command-menu {
   .live-bar-actions .btn { min-height: 44px; }
   /* 下部バーに本文が隠れないよう、会議中の画面に余白を足す。 */
   .live-page { padding-bottom: 72px; }
+  /* 一時停止・再開・終了は下部バーが担うので、見出しの同じボタンはモバイルでは隠す（重複解消）。 */
+  .head-actions .live-dup { display: none; }
 }

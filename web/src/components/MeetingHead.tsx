@@ -149,19 +149,19 @@ export function MeetingHead({ detail, extra }: { detail: MeetingDetail; extra?: 
   } else if (live && meeting.status !== "wrapping") {
     if (here) {
       buttons.push(
-        <button key="pause" className="btn" type="button" disabled={disabled} onClick={() => void guarded("pause", () => pauseMeeting(id))}>
+        <button key="pause" className="btn live-dup" type="button" disabled={disabled} onClick={() => void guarded("pause", () => pauseMeeting(id))}>
           一時停止
         </button>,
       );
     } else {
       buttons.push(
-        <button key="resume" className="btn primary" type="button" disabled={disabled} onClick={() => void guarded("resume", () => resumeMeeting(id))}>
+        <button key="resume" className="btn primary live-dup" type="button" disabled={disabled} onClick={() => void guarded("resume", () => resumeMeeting(id))}>
           {meeting.status === "paused" ? "再開" : "このタブで録音を再開"}
         </button>,
       );
     }
     buttons.push(
-      <button key="finish" className="btn danger" type="button" disabled={disabled} onClick={() => void guarded("finish", () => finishMeeting(id))}>
+      <button key="finish" className="btn danger live-dup" type="button" disabled={disabled} onClick={() => void guarded("finish", () => finishMeeting(id))}>
         終了
       </button>,
     );
