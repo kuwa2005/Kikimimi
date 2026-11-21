@@ -278,21 +278,21 @@ function RealtimeSection({ settings, onChanged }: { settings: SettingsData; onCh
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   // 押した時点で選んだ状態にする（保存の応答を待たない）。
-  const [pending, setPending] = useState<"off" | "local" | "cloud" | null>(null);
-  const mode = pending ?? (settings.realtime_captions || "off");
+  const [pending, setPending] = useState<"local" | "cloud" | null>(null);
+  // 認識エンジン（端末内/Google）。旧「off」は端末内として扱う（「使わない」状態は廃止）。
+  const engine: "local" | "cloud" = (pending ?? settings.realtime_captions) === "cloud" ? "cloud" : "local";
   const check = async (target: "local" | "cloud") => {
     setStatus("確認しています…");
     const result = await captionAvailability(target);
     setStatus(AVAILABILITY[result] || result);
     return result;
   };
-  const choose = async (next: "off" | "local" | "cloud") => {
+  const choose = async (next: "local" | "cloud") => {
     setBusy(true);
     setPending(next);
     try {
       onChanged(await api<SettingsData>("/api/settings", { method: "PUT", body: { realtime_captions: next } }));
-      if (next !== "off") await check(next);
-      else setStatus("");
+      await check(next);
     } catch (err) {
       notify(errorMessage(err), "error");
     } finally {
@@ -312,36 +312,30 @@ function RealtimeSection({ settings, onChanged }: { settings: SettingsData; onCh
     <section className="panel settings-section" aria-labelledby="sec-realtime">
       <h2 id="sec-realtime">リアルタイム文字起こし（速報字幕）</h2>
       <p className="muted small">
-        APIキーで文字起こしする会議では、録音中に Chrome の速報を出します。API の文字起こしが届いた部分の速報は置き換わり、速報自体は残りません。Chrome の音声認識だけを選んだ会議では、この認識を書き起こしとして保存します。
+        Chrome の音声認識で、録音中に文字を出します。Chrome の音声認識だけの会議では、この文字をそのまま書き起こしとして保存します。APIキーで文字起こしする会議では速報として表示し、API の文字起こしが届いた部分は置き換わります。下で、認識に使うエンジンを選べます。
       </p>
       {!settings.realtime_allowed ? (
         <div className="banner">いまのプランでは、リアルタイム文字起こしは使えません。</div>
       ) : (
         <>
           <fieldset className="field provider-pick">
-            <legend>速報字幕</legend>
+            <legend>認識エンジン</legend>
             <label className="check">
-              <input type="radio" name="realtime" checked={mode === "off"} disabled={busy} onChange={() => void choose("off")} />
-              使わない
+              <input type="radio" name="realtime" checked={engine === "local"} disabled={busy} onChange={() => void choose("local")} />
+              端末内で認識（音声は端末の外に出ません。既定）
             </label>
-            <label className="check">
-              <input type="radio" name="realtime" checked={mode === "local"} disabled={busy} onChange={() => void choose("local")} />
-              使う（端末内で認識。音声は端末の外に出ません）
-            </label>
-            {settings.cloud_speech_allowed || mode === "cloud" ? (
+            {settings.cloud_speech_allowed || engine === "cloud" ? (
               <label className="check">
-                <input type="radio" name="realtime" checked={mode === "cloud"} disabled={busy || !settings.cloud_speech_allowed} onChange={() => void choose("cloud")} />
-                使う（Google のサーバで認識。音声が Google に送られます。運用者が許可した場合だけ）
+                <input type="radio" name="realtime" checked={engine === "cloud"} disabled={busy || !settings.cloud_speech_allowed} onChange={() => void choose("cloud")} />
+                Google のサーバで認識（音声が Google に送られます。運用者が許可した場合だけ）
               </label>
             ) : null}
           </fieldset>
           <div className="actions">
-            {mode !== "off" ? (
-              <button className="btn small" type="button" disabled={busy} onClick={() => void check(mode)}>
-                この端末で使えるか確認
-              </button>
-            ) : null}
-            {mode === "local" && /言語パックを入れると/.test(status) ? (
+            <button className="btn small" type="button" disabled={busy} onClick={() => void check(engine)}>
+              この端末で使えるか確認
+            </button>
+            {engine === "local" && /言語パックを入れると/.test(status) ? (
               <button className="btn small primary" type="button" disabled={busy} onClick={() => void install()}>
                 日本語の言語パックを入れる
               </button>

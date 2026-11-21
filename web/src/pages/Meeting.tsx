@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorMessage, request } from "../api/client";
-import type { Evidence, ExportScope, MeetingDetail, Segment } from "../api/types";
+import type { Evidence, ExportScope, MeetingDetail, Segment, Settings } from "../api/types";
 import { fmt } from "../lib/format";
 import { useMediaQuery } from "../lib/media";
 import { pref, PREF_PANEL, PREF_SHOW_ASSIST, savePref } from "../lib/prefs";
@@ -21,7 +21,7 @@ import { KnowledgePanel } from "../components/Knowledge";
 import { TabPanel, Tabs } from "../components/Tabs";
 import { AssistBar, markedIds, NotesPanel, TopicHits } from "../components/Assist";
 import { ImportDialog } from "../components/Import";
-import { chromeCaptionMode, configureCaptions, setCaptionPersist, setCaptionPhrases } from "../lib/captions";
+import { configureCaptions, setCaptionPersist, setCaptionPhrases } from "../lib/captions";
 import { sessionGet, sessionRemove } from "../lib/prefs";
 
 /** 新しい会議の画面から「ファイルから取り込む」で来たら、取り込みの画面を開く。 */
@@ -155,6 +155,19 @@ function LiveView({ detail }: { detail: MeetingDetail }) {
   const [importing, setImporting] = useImportDialog(detail.meeting.id);
   const meetingId = detail.meeting.id;
   const now = useLiveSeconds(detail);
+  // 速報字幕（Chrome 音声認識）のエンジン設定（端末内/Google）。既定は端末内。旧「off」も端末内として扱う。
+  const [rtEngine, setRtEngine] = useState<"local" | "cloud">("local");
+  useEffect(() => {
+    let alive = true;
+    void api<Settings>("/api/settings")
+      .then((s) => {
+        if (alive) setRtEngine(s.realtime_captions === "cloud" ? "cloud" : "local");
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
   // 速報字幕（#104）: 設定とプランで ON のときだけ。議題と参加者名を、当てやすくする語として渡す。
   const agendaWords = detail.questions.map((q) => q.body).join("\n") + "\n" + (detail.meeting.participants || "");
   useEffect(() => {
@@ -171,23 +184,22 @@ function LiveView({ detail }: { detail: MeetingDetail }) {
       };
     }
     // api: Chrome の速報 ＋ API の文字起こし。chrome: Chrome の音声認識だけを保存する。
-    let alive = true;
     // 確定文は端末に保存してから送る（届くまで端末に残る）。API の会議でも控えとして送り、
     // API の文字起こしが失敗した区間の穴埋めに使う。
     setCaptionPersist((line) => saveCaption(meetingId, line.chunkStart, line.text));
-    void chromeCaptionMode().then((captionMode) => {
-      if (!alive) return;
-      configureCaptions(captionMode);
-      if (captionMode === "off") {
-        notify("このブラウザは音声認識（速報字幕）に対応していません。Android かパソコンの Chrome でお使いください。録音は続いており、終了時に API での文字起こしも選べます。", "warn", "caption");
-      }
-    });
+    // 認識エンジンは設定（端末内/Google）に従う。端末内が使えなければ captions 側が Google へ切り替える。
+    const supported = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
+    if (!supported) {
+      configureCaptions("off");
+      notify("このブラウザは音声認識（速報字幕）に対応していません。Android かパソコンの Chrome でお使いください。録音は続いており、終了時に API での文字起こしも選べます。", "warn", "caption");
+    } else {
+      configureCaptions(rtEngine);
+    }
     return () => {
-      alive = false;
       setCaptionPersist(null);
       configureCaptions("off");
     };
-  }, [meetingId, speech]);
+  }, [meetingId, speech, rtEngine]);
   useLimitWarning(detail);
   const marked = markedIds(detail);
   const notes = detail.notes || [];
