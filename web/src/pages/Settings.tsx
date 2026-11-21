@@ -310,7 +310,7 @@ function RealtimeSection({ settings, onChanged }: { settings: SettingsData; onCh
   };
   return (
     <section className="panel settings-section" aria-labelledby="sec-realtime">
-      <h2 id="sec-realtime">リアルタイム文字起こし（速報字幕）</h2>
+      <h2 id="sec-realtime">速報字幕（Chrome の音声認識）</h2>
       <p className="muted small">
         Chrome の音声認識で、録音中に文字を出します。Chrome の音声認識だけの会議では、この文字をそのまま書き起こしとして保存します。APIキーで文字起こしする会議では速報として表示し、API の文字起こしが届いた部分は置き換わります。下で、認識に使うエンジンを選べます。
       </p>

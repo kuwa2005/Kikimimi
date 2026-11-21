@@ -97,7 +97,7 @@ export function Account() {
             </p>
             <p className="muted small">有料プランは現在ありません。</p>
             <p className="small">
-              使える機能: リアルタイム文字起こし（速報字幕）{account.plan.features?.realtime_captions ? " ✓ 使えます" : " — このプランでは使えません"}
+              使える機能: 速報字幕（Chrome の音声認識）{account.plan.features?.realtime_captions ? " ✓ 使えます" : " — このプランでは使えません"}
             </p>
             <ul className="usage-list">
               {account.usage.map((item) => (
