@@ -6,11 +6,14 @@ import { level, localSeconds, recordingHere } from "../recorder/recorder";
 export function Meter({ active, label = "入力の音量" }: { active: boolean; label?: string }) {
   const bar = useRef<HTMLSpanElement>(null);
   useEffect(() => {
+    if (!active) return;
     const timer = setInterval(() => {
-      if (bar.current) bar.current.style.width = active ? Math.min(100, level() * 280) + "%" : "0%";
+      if (bar.current) bar.current.style.width = Math.min(100, level() * 280) + "%";
     }, 120);
     return () => clearInterval(timer);
   }, [active]);
+  // 動いていないメーターの空トラックは飾りに見えるので、録音中・テスト中だけ出す。
+  if (!active) return null;
   return (
     <div className="meter" role="img" aria-label={label}>
       <span ref={bar} />
