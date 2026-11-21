@@ -42,7 +42,15 @@ export function markdown(source: string): string {
         out.push(`<${tag}>`);
         list = tag;
       }
-      out.push(`<li>${inline((bullet || numbered)![1])}</li>`);
+      const content = (bullet || numbered)![1];
+      // AI の要約は ToDo を「- [ ]」で書くことが多い。素の [ ] を出さずチェックボックスにする。
+      const task = bullet ? content.match(/^\[([ xX])\]\s+(.*)$/) : null;
+      if (task) {
+        const checked = task[1].toLowerCase() === "x" ? " checked" : "";
+        out.push(`<li class="task"><input type="checkbox" disabled${checked}>${inline(task[2])}</li>`);
+      } else {
+        out.push(`<li>${inline(content)}</li>`);
+      }
     } else if (quote) {
       closeList();
       out.push(`<blockquote>${inline(quote[1])}</blockquote>`);

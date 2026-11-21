@@ -401,6 +401,9 @@ mark { background: var(--mark); color: inherit; }
 .md h3 { font-size: 1.12rem; }
 .md ul, .md ol { margin: 4px 0 10px; padding-left: 1.4em; }
 .md blockquote { margin: 6px 0; padding: 6px 12px; border-left: 3px solid var(--line-strong); color: var(--muted); }
+/* ToDo（- [ ] / - [x]）はチェックボックスで表示。素の [ ] は出さない。 */
+.md li.task { list-style: none; margin-left: -1.3em; }
+.md li.task input { margin-right: 8px; vertical-align: -1px; }
 .md pre { background: var(--surface-3); border-radius: 8px; padding: 10px; overflow: auto; }
 textarea.editor { min-height: 420px; font-family: "Cascadia Mono", Consolas, monospace; font-size: 0.92rem; }
 pre.preview {

@@ -619,13 +619,14 @@ function DoneView({ detail }: { detail: MeetingDetail }) {
           id="player"
           ref={player}
           controls
+          hidden={noAudio}
           preload="metadata"
           src={`/api/meetings/${meeting.id}/audio`}
           onError={() => setNoAudio(true)}
           onTimeUpdate={followPlayer}
           aria-label="会議の録音"
         />
-        {noAudio ? <p className="muted small">録音はまだありません。</p> : null}
+        {noAudio ? <p className="muted small">この会議に録音ファイルはありません。</p> : null}
       </div>
       <Tabs
         idPrefix="done"
